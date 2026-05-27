@@ -32,12 +32,6 @@ FetchContent_Declare(
     SYSTEM
 )
 FetchContent_Declare(
-    ktx
-    GIT_REPOSITORY https://github.com/KhronosGroup/KTX-Software 
-    GIT_TAG v4.4.2
-    SYSTEM
-)
-FetchContent_Declare(
     tinyobjloader
     GIT_REPOSITORY https://github.com/tinyobjloader/tinyobjloader
     GIT_TAG v2.0.0rc13
@@ -60,7 +54,7 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/nothings/stb.git
     GIT_TAG master
 )
-FetchContent_MakeAvailable(glfw glm ktx spdlog tinyobjloader vmahpp stb)
+FetchContent_MakeAvailable(glfw glm spdlog tinyobjloader vmahpp stb)
 
 find_program(SLANGC_EXECUTABLE
     NAMES slangc
@@ -122,6 +116,7 @@ add_executable(
     src/target.h
     src/swapchain.cpp
     src/swapchain.h
+    src/performance.h
     src/camera.h
 )
 add_shaders(${PROJECT_NAME} shaders/shader.slang)
@@ -148,7 +143,7 @@ endif()
 if (MSVC) 
     target_compile_options(
         ${PROJECT_NAME} PRIVATE 
-        /W4 $<$<BOOL:${ENABLE_WERROR}>:/WX>
+        /W4 $<$<BOOL:${ENABLE_WERROR}>:/WX> /wd4458
     )
 else ()
     target_compile_options(
@@ -175,7 +170,6 @@ target_link_libraries(
     glm::glm 
     spdlog
     glfw 
-    ktx 
     stb
     tinyobjloader
     VulkanMemoryAllocator-Hpp::VulkanMemoryAllocator-Hpp

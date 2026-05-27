@@ -3,6 +3,5 @@ Checks: >
   performance-*,
   modernize-*,
   -modernize-use-trailing-return-type,
-  -modernize-avoid-c-style-cast,
   -modernize-use-nodiscard
 HeaderFilterRegex: '^.*/src/.*$'

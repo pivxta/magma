@@ -5,8 +5,8 @@
 #include <spdlog/spdlog.h>
 #include <GLFW/glfw3.h>
 
-static constexpr size_t NUM_KEYS = (size_t)Key::Last + 1;
-static constexpr size_t NUM_MOUSE_BUTTONS = (size_t)MouseButton::Last + 1; 
+static constexpr size_t NUM_KEYS = static_cast<size_t>(Key::Last) + 1;
+static constexpr size_t NUM_MOUSE_BUTTONS = static_cast<size_t>(MouseButton::Last) + 1; 
 
 static inline Key glfw_to_key(int key) {
     switch (key) {
@@ -188,7 +188,7 @@ struct Input::State {
     }
 
     void handle_key(int key_glfw, int action) {
-        auto key_index = (size_t)glfw_to_key(key_glfw);
+        auto key_index = static_cast<size_t>(glfw_to_key(key_glfw));
         switch (action) {
             case GLFW_PRESS:
                 this->keys_just_pressed.set(key_index, !this->keys_pressed[key_index]);
@@ -204,7 +204,7 @@ struct Input::State {
     }
 
     void handle_mouse_button(int button_glfw, int action) {
-        auto button_index = (size_t)glfw_to_mouse_button(button_glfw);
+        auto button_index = static_cast<size_t>(glfw_to_mouse_button(button_glfw));
         switch (action) {
             case GLFW_PRESS:
                 this->mouse_buttons_just_pressed.set(
@@ -228,39 +228,48 @@ Input::Input()
     : state(std::make_shared<State>()) {}
 
 bool Input::key_pressed(Key key) const {
-    return this->state->keys_pressed[(size_t)key];
+    return this->state->keys_pressed[static_cast<size_t>(key)];
 }
 
 bool Input::key_just_pressed(Key key) const {
-    return this->state->keys_just_pressed[(size_t)key];
+    return this->state->keys_just_pressed[static_cast<size_t>(key)];
 }
 
 bool Input::key_just_released(Key key) const {
-    return this->state->keys_just_released[(size_t)key];
+    return this->state->keys_just_released[static_cast<size_t>(key)];
 }
 
 bool Input::mouse_button_pressed(MouseButton button) const {
-    return this->state->mouse_buttons_pressed[(size_t)button];
+    return this->state->mouse_buttons_pressed[static_cast<size_t>(button)];
 }
 
 bool Input::mouse_button_just_pressed(MouseButton button) const {
-    return this->state->mouse_buttons_just_pressed[(size_t)button];
+    return this->state->mouse_buttons_just_pressed[static_cast<size_t>(button)];
 }
 
 bool Input::mouse_button_just_released(MouseButton button) const {
-    return this->state->mouse_buttons_just_released[(size_t)button];
+    return this->state->mouse_buttons_just_released[static_cast<size_t>(button)];
 }
 
 glm::vec2 Input::cursor_position() const {
-    return { (float)this->state->cursor_x, (float)this->state->cursor_y };
+    return { 
+        static_cast<float>(this->state->cursor_x), 
+        static_cast<float>(this->state->cursor_y)
+    };
 }
 
 glm::vec2 Input::cursor_delta() const {
-    return { (float)this->state->cursor_delta_x, (float)this->state->cursor_delta_y };
+    return { 
+        static_cast<float>(this->state->cursor_delta_x), 
+        static_cast<float>(this->state->cursor_delta_y) 
+    };
 }
 
 glm::vec2 Input::scroll_delta() const {
-    return { (float)this->state->scroll_delta_x, (float)this->state->scroll_delta_y };
+    return { 
+        static_cast<float>(this->state->scroll_delta_x), 
+        static_cast<float>(this->state->scroll_delta_y)
+    };
 }
 
 static constexpr int MAX_WIDTH = 32768;
@@ -280,7 +289,11 @@ struct Window::Inner: Target {
         glfwInit();
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
-        this->window = glfwCreateWindow((int)width, (int)height, title, nullptr, nullptr);
+        this->window = glfwCreateWindow(
+            static_cast<int>(width), 
+            static_cast<int>(height), 
+            title, nullptr, nullptr
+        );
         glfwSetWindowUserPointer(this->window, this);
         glfwSetWindowSizeLimits(this->window, 1, 1, MAX_WIDTH, MAX_HEIGHT);
         glfwSetWindowSizeCallback(this->window, handle_resize);
@@ -301,13 +314,13 @@ struct Window::Inner: Target {
     WindowSize logical_size() const {
         int width, height;
         glfwGetWindowSize(this->window, &width, &height);
-        return { (uint32_t)width, (uint32_t) height };
+        return { static_cast<uint32_t>(width), static_cast<uint32_t>(height) };
     }
 
     WindowSize physical_size() const {
         int width, height;
         glfwGetFramebufferSize(this->window, &width, &height);
-        return { (uint32_t)width, (uint32_t) height };
+        return { static_cast<uint32_t>(width), static_cast<uint32_t>(height) };
     }
 
     void set_cursor_locked(bool locked) {
@@ -327,27 +340,27 @@ struct Window::Inner: Target {
 
     // NOLINTBEGIN(bugprone-easily-swappable-parameters)
     static void handle_resize(GLFWwindow* window, int, int) {
-        auto inner = (Inner*)glfwGetWindowUserPointer(window);
+        auto inner = reinterpret_cast<Inner*>(glfwGetWindowUserPointer(window));
         inner->events.push_back(WindowEvent::Resized);
     }
     
     static void handle_cursor(GLFWwindow* window, double x, double y) {
-        auto inner = (Inner*)glfwGetWindowUserPointer(window);
+        auto inner = reinterpret_cast<Inner*>(glfwGetWindowUserPointer(window));
         inner->input.state->handle_cursor(x, y);
     }
 
     static void handle_scroll(GLFWwindow* window, double x, double y) {
-        auto inner = (Inner*)glfwGetWindowUserPointer(window);
+        auto inner = reinterpret_cast<Inner*>(glfwGetWindowUserPointer(window));
         inner->input.state->handle_scroll(x, y);
     }
 
     static void handle_key(GLFWwindow* window, int key, int, int action, int) {
-        auto inner = (Inner*)glfwGetWindowUserPointer(window);
+        auto inner = reinterpret_cast<Inner*>(glfwGetWindowUserPointer(window));
         inner->input.state->handle_key(key, action);
     }
 
     static void handle_mouse_button(GLFWwindow* window, int button, int action, int) {
-        auto inner = (Inner*)glfwGetWindowUserPointer(window);
+        auto inner = reinterpret_cast<Inner*>(glfwGetWindowUserPointer(window));
         inner->input.state->handle_mouse_button(button, action);
     }
     // NOLINTEND(bugprone-easily-swappable-parameters)
@@ -357,7 +370,7 @@ struct Window::Inner: Target {
         const char** instance_ext_names = glfwGetRequiredInstanceExtensions(&instance_ext_count);
         return {
             instance_ext_names, 
-            instance_ext_names + (size_t)instance_ext_count
+            instance_ext_names + static_cast<size_t>(instance_ext_count)
         };
     }
 
@@ -365,7 +378,9 @@ struct Window::Inner: Target {
         vk::Result result = vk::Result::eSuccess;
         if (this->surface == vk::SurfaceKHR()) {
             VkSurfaceKHR surface;
-            result = (vk::Result)glfwCreateWindowSurface(instance, this->window, nullptr, &surface);
+            result = static_cast<vk::Result>(
+                glfwCreateWindowSurface(instance, this->window, nullptr, &surface)
+            );
             this->surface = surface;
         }
         return {result, this->surface};
@@ -374,7 +389,7 @@ struct Window::Inner: Target {
     vk::Extent2D target_extent() override {
         int width, height;
         glfwGetFramebufferSize(this->window, &width, &height);
-        return { (uint32_t)width, (uint32_t) height };
+        return { static_cast<uint32_t>(width), static_cast<uint32_t>(height) };
     }
 };
 

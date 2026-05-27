@@ -93,7 +93,7 @@ struct Instance {
                     .setLocation(first_location + i)
                     .setBinding(binding)
                     .setFormat(vk::Format::eR32G32B32Sfloat)
-                    .setOffset(3 * sizeof(float) * (size_t)i)
+                    .setOffset(3 * sizeof(float) * static_cast<size_t>(i))
             );
         }
     }
@@ -115,7 +115,10 @@ static inline std::vector<uint32_t> read_spirv_file(const std::filesystem::path&
     try {
         std::vector<uint32_t> buffer((file_size + sizeof(uint32_t) - 1) / sizeof(uint32_t));
         std::ifstream stream(path, std::ios::binary);
-        stream.read((char*)buffer.data(), (std::streamsize)file_size);
+        stream.read(
+            reinterpret_cast<char*>(buffer.data()), 
+            static_cast<std::streamsize>(file_size)
+        );
         return buffer;
     } catch (const std::exception& e) {
         spdlog::error("Failed to open file '{}': {}", path.c_str(), e.what());
@@ -130,14 +133,13 @@ struct Renderer::Inner {
         this->destroy();
     }
 
-    void initialize(std::shared_ptr<Target> target) {
+    void initialize(const std::shared_ptr<Target>& target) {
         this->create_instance(*target);
         this->swapchain = Swapchain(this->instance, target);
         this->swapchain_info = SwapchainConfigureInfo()
             .set_format(vk::Format::eB8G8R8A8Srgb)
             .set_colorspace(vk::ColorSpaceKHR::eSrgbNonlinear)
-            .set_present_mode(vk::PresentModeKHR::eMailbox)
-            .set_extent(target->target_extent());
+            .set_present_mode(vk::PresentModeKHR::eMailbox);
         this->pick_physical_device();
         this->create_device_and_queue();
         this->create_allocator();
@@ -175,8 +177,7 @@ struct Renderer::Inner {
         this->view_position = camera.translation;
     }
 
-    void resize(uint32_t width, uint32_t height) {
-        this->swapchain_info.extent = vk::Extent2D(width, height);
+    void resize() {
         this->should_reconfigure_swapchain = true;
     }
 
@@ -458,7 +459,7 @@ private:
         auto input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo()
             .setTopology(vk::PrimitiveTopology::eTriangleList);
 
-        vk::SampleMask sample_mask = ~((vk::SampleMask)0);
+        vk::SampleMask sample_mask = ~static_cast<vk::SampleMask>(0);
         auto ms_state = vk::PipelineMultisampleStateCreateInfo()
             .setRasterizationSamples(vk::SampleCountFlagBits::e1)
             .setPSampleMask(&sample_mask)
@@ -599,7 +600,7 @@ private:
             std::exit(1);
         }
 
-        vk::Extent3D extent = vk::Extent3D((uint32_t)width, (uint32_t)height, 1);
+        vk::Extent3D extent = vk::Extent3D(width, height, 1);
         vk::Format format = vk::Format::eR8G8B8A8Srgb;
         auto image_info = vk::ImageCreateInfo()
             .setImageType(vk::ImageType::e2D)
@@ -622,8 +623,8 @@ private:
         auto [alloc, image] = pair;
 
         auto [staging, staging_alloc] = this->create_buffer_staging(
-            (void *)image_bytes,
-            (size_t)width * (size_t)height * 4
+            image_bytes,
+            static_cast<size_t>(width) * static_cast<size_t>(height) * 4
         );
         stbi_image_free(image_bytes);
 
@@ -729,9 +730,12 @@ private:
         for (int layer = 0; layer < layers; layer++) {
             for (int row = 0; row < rows; row++) {
                 for (int column = 0; column < columns; column++) {
-                    float x = ((float)row - (float)rows * 0.5f + 0.5f) * spacing;
-                    float z = ((float)column - (float)columns * 0.5f + 0.5f) * spacing;
-                    float y = ((float)layer) * spacing + 1.0f;
+                    auto frow = static_cast<float>(row);
+                    auto fcolumn = static_cast<float>(column);
+                    auto flayer = static_cast<float>(layer);
+                    float x = (frow - static_cast<float>(rows) * 0.5f + 0.5f) * spacing;
+                    float z = (fcolumn - static_cast<float>(columns) * 0.5f + 0.5f) * spacing;
+                    float y = flayer * spacing + 1.0f;
                     instances.emplace_back(glm::vec3(x, y, z));
                 }
             }
@@ -812,26 +816,26 @@ private:
             );
 
         auto [vertex_staging, vertex_staging_alloc] =
-            this->create_buffer_staging((void*)vertices.data(), sizeof(vertices));
+            this->create_buffer_staging(vertices.data(), sizeof(vertices));
         auto [index_staging, index_staging_alloc] =
-            this->create_buffer_staging((void*)indices.data(), sizeof(indices));
+            this->create_buffer_staging(indices.data(), sizeof(indices));
         auto [instance_staging, instance_staging_alloc] = this->create_buffer_staging(
-            (void*)instances.data(), instances.size() * sizeof(instances[0])
+            instances.data(), instances.size() * sizeof(instances[0])
         );
 
         vk::CommandBuffer command_buffer = this->begin_one_shot_commands();
         command_buffer.copyBuffer(
             vertex_staging,
             vertex_buffer,
-            vk::BufferCopy().setSize((vk::DeviceSize)sizeof(vertices))
+            vk::BufferCopy().setSize(sizeof(vertices))
         );
         command_buffer.copyBuffer(
-            index_staging, index_buffer, vk::BufferCopy().setSize((vk::DeviceSize)sizeof(indices))
+            index_staging, index_buffer, vk::BufferCopy().setSize(sizeof(indices))
         );
         command_buffer.copyBuffer(
             instance_staging,
             instance_buffer,
-            vk::BufferCopy().setSize((vk::DeviceSize)(instances.size() * sizeof(instances[0])))
+            vk::BufferCopy().setSize(instances.size() * sizeof(instances[0]))
         );
         this->submit_one_shot_commands_sync(command_buffer);
 
@@ -862,18 +866,18 @@ private:
         this->point_light_buffer_mapped = point_light_info.pMappedData;
     }
 
-    vk::DeviceSize get_uniform_stride(size_t uniform_size) {
+    uint32_t get_uniform_stride(uint32_t uniform_size) {
         vk::DeviceSize align =
             this->physical_device.getProperties().limits.minUniformBufferOffsetAlignment;
 
-        return ((vk::DeviceSize)uniform_size + align - 1) & ~(align - 1);
+        return (uniform_size + align - 1) & ~(align - 1);
     }
 
-    vk::DeviceSize get_storage_stride(vk::DeviceSize storage_size) {
+    uint32_t get_storage_stride(uint32_t storage_size) {
         vk::DeviceSize align =
             this->physical_device.getProperties().limits.minStorageBufferOffsetAlignment;
 
-        return ((vk::DeviceSize)storage_size + align - 1) & ~(align - 1);
+        return (storage_size + align - 1) & ~(align - 1);
     }
 
     void destroy_buffers() {
@@ -1057,18 +1061,21 @@ private:
     }
 
     void set_mapped_uniforms(const Uniforms& uniforms) {
-        auto mapped = (Uniforms*)(
-            (uint8_t*)this->uniform_buffer_mapped 
-                + (size_t)this->uniform_stride * (size_t)this->frame_index
+        auto mapped = reinterpret_cast<Uniforms*>(
+            reinterpret_cast<uint8_t*>(this->uniform_buffer_mapped) 
+                + static_cast<size_t>(this->uniform_stride) 
+                    * static_cast<size_t>(this->frame_index)
         );
         *mapped = uniforms;
     }
 
     void update_lights() {
-        auto mapped_dir_lights = (uint8_t*)this->directional_light_buffer_mapped 
-            + (size_t)this->directional_light_buffer_stride * (size_t)this->frame_index;
-        auto mapped_point_lights = (uint8_t*)this->point_light_buffer_mapped 
-            + (size_t)this->point_light_buffer_stride * (size_t)this->frame_index;
+        auto mapped_dir_lights = reinterpret_cast<uint8_t*>(this->directional_light_buffer_mapped)
+            + static_cast<size_t>(this->directional_light_buffer_stride) 
+                * static_cast<size_t>(this->frame_index);
+        auto mapped_point_lights = reinterpret_cast<uint8_t*>(this->point_light_buffer_mapped)
+            + static_cast<size_t>(this->point_light_buffer_stride) 
+                * static_cast<size_t>(this->frame_index);
         std::memcpy(
             mapped_dir_lights, 
             this->directional_lights.data(), 
@@ -1173,9 +1180,9 @@ private:
             this->pipeline_layout, 0,
             this->descriptor_set,
             {
-                (uint32_t)this->uniform_stride * this->frame_index,
-                (uint32_t)this->directional_light_buffer_stride * this->frame_index,
-                (uint32_t)this->point_light_buffer_stride * this->frame_index
+                this->uniform_stride * this->frame_index,
+                this->directional_light_buffer_stride * this->frame_index,
+                this->point_light_buffer_stride * this->frame_index
             }
         );
         command_buffer.bindIndexBuffer(this->index_buffer, 0, vk::IndexType::eUint16);
@@ -1300,16 +1307,16 @@ private:
     vk::Buffer uniform_buffer;
     vma::Allocation uniform_buffer_alloc;
     void* uniform_buffer_mapped;
-    vk::DeviceAddress uniform_stride;
+    uint32_t uniform_stride;
 
     vk::Buffer directional_light_buffer;
     vma::Allocation directional_light_buffer_alloc;
-    vk::DeviceSize directional_light_buffer_stride;
+    uint32_t directional_light_buffer_stride;
     void *directional_light_buffer_mapped;
 
     vk::Buffer point_light_buffer;
     vma::Allocation point_light_buffer_alloc;
-    vk::DeviceSize point_light_buffer_stride;
+    uint32_t point_light_buffer_stride;
     void *point_light_buffer_mapped;
 
     vk::Buffer instance_buffer;
@@ -1351,7 +1358,7 @@ private:
 
 Renderer::Renderer() = default;
 
-Renderer::Renderer(std::shared_ptr<Target> target)
+Renderer::Renderer(const std::shared_ptr<Target>& target)
     : inner(std::make_unique<Inner>()) 
 {
     this->inner->initialize(target);
@@ -1368,8 +1375,8 @@ Renderer& Renderer::operator=(Renderer&& other) noexcept {
     return *this;
 }
 
-void Renderer::resize(uint32_t width, uint32_t height) {
-    this->inner->resize(width, height);
+void Renderer::resize() {
+    this->inner->resize();
 }
 
 void Renderer::set_camera(const Camera& camera) {

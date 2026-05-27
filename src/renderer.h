@@ -9,13 +9,13 @@ struct Camera;
 class Renderer {
 public:
     Renderer();
-    Renderer(std::shared_ptr<Target> target);
+    Renderer(const std::shared_ptr<Target>& target);
     ~Renderer();
 
     Renderer(Renderer&& other) noexcept;
     Renderer& operator=(Renderer&& other) noexcept;
 
-    void resize(uint32_t width, uint32_t height);
+    void resize();
 
     void set_camera(const Camera& world_to_clip);
     void draw_frame();

@@ -9,6 +9,7 @@
 #include "window.h"
 #include "input.h"
 #include "renderer.h"
+#include "performance.h"
 #include "time.h"
 
 struct CameraController {
@@ -36,11 +37,11 @@ private:
     void main_loop() {
         this->start();
 
-        double last_time = get_current_time_seconds();
+        PerformanceCounter perf_counter;
+        Instant last_frame = Instant::now();
         while (true) {
-            double current_time = get_current_time_seconds();
-            auto delta_time = (float)(current_time - last_time);
-            last_time = current_time;
+            auto delta_time = last_frame.elapsed_seconds<float>();
+            last_frame = Instant::now();
 
             for (auto event: this->window.poll_events()) {
                 switch (event) {
@@ -55,20 +56,32 @@ private:
             this->update(delta_time);
             this->renderer.set_camera(this->camera);
             this->renderer.draw_frame();
+
+            if (auto perf_stats = perf_counter.record(1.0); perf_stats != std::nullopt) {
+                spdlog::info(
+                    "FPS: {:.0f} | avg: {:.2f}ms | median: {:.2f}ms | 1% low: {:.2f}ms | 0.1% low: {:.2f}ms",
+                    perf_stats->frames_per_second,
+                    perf_stats->frame_time_avg_ms,
+                    perf_stats->frame_time_median_ms,
+                    perf_stats->frame_time_high_1pct_ms,
+                    perf_stats->frame_time_high_0_1pct_ms
+                );
+            }
         }
     }
 
     void resize() {
         WindowSize size = this->window.physical_size();
-        this->renderer.resize(size.width, size.height);
-        this->camera.aspect_ratio = (float)size.width / (float)size.height;
+        this->renderer.resize();
+        this->camera.aspect_ratio = 
+            static_cast<float>(size.width) / static_cast<float>(size.height);
     }
 
     void start() {
         this->window.set_cursor_locked(true);
         this->camera.aspect_ratio = 
-            (float)this->window.physical_size().width 
-                / (float)this->window.physical_size().height;
+            static_cast<float>(this->window.physical_size().width)
+                / static_cast<float>(this->window.physical_size().height);
     }
 
     void update(float delta_time) {

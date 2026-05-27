@@ -1,7 +1,24 @@
 #pragma once
+#include <variant>
 #include <glm/vec3.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/mat4x4.hpp>
+
+struct OrthographicProjection {
+    float viewport_height = 1.0f;
+    float scale = 1.0f;
+    float near = 0.001f;
+};
+
+struct PerspectiveProjection {
+    float fov_radians = glm::radians(90.0f);
+    float near = 0.001f;
+};
+
+using Projection = std::variant<
+    PerspectiveProjection, 
+    OrthographicProjection
+>;
 
 struct Camera {
     glm::vec3 translation = glm::vec3(0.0f);

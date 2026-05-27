@@ -15,7 +15,7 @@ struct Swapchain::Inner {
     std::vector<vk::ImageView> views;
     std::vector<vk::Semaphore> presentable;
 
-    Inner(vk::Instance instance, std::shared_ptr<Target> target) {
+    Inner(vk::Instance instance, const std::shared_ptr<Target>& target) {
         this->instance = instance;
         this->target = target;
 
@@ -32,7 +32,7 @@ struct Swapchain::Inner {
         auto [result, surface_caps] = physical_device.getSurfaceCapabilitiesKHR(this->surface);
         vk_expect(result, "Physical device surface capabilities not availible");
 
-        auto extent = this->pick_extent(surface_caps, info.extent);
+        auto extent = this->pick_extent(surface_caps);
         auto present_mode = this->pick_present_mode(physical_device, info.present_mode);
         auto surface_format =
             this->pick_surface_format(physical_device, info.format, info.colorspace);
@@ -185,14 +185,15 @@ private:
         }
     }
 
-    vk::Extent2D pick_extent(const vk::SurfaceCapabilitiesKHR& caps, vk::Extent2D extent) {
+    vk::Extent2D pick_extent(const vk::SurfaceCapabilitiesKHR& caps) {
         if (caps.currentExtent == 0xffffffff) {
             return caps.currentExtent;
         }
 
+        vk::Extent2D extent = this->target->target_extent();
         return {
-            std::clamp((uint32_t)extent.width, caps.minImageExtent.width, caps.maxImageExtent.width),
-            std::clamp((uint32_t)extent.height, caps.minImageExtent.height, caps.maxImageExtent.height)
+            std::clamp(extent.width, caps.minImageExtent.width, caps.maxImageExtent.width),
+            std::clamp(extent.height, caps.minImageExtent.height, caps.maxImageExtent.height)
         };
     }
 
@@ -237,7 +238,7 @@ private:
 
 Swapchain::Swapchain() = default;
 
-Swapchain::Swapchain(vk::Instance instance, std::shared_ptr<Target> target)
+Swapchain::Swapchain(vk::Instance instance, const std::shared_ptr<Target>& target)
     : inner(std::make_shared<Inner>(instance, target)) {}
 
 Swapchain::~Swapchain() = default;
@@ -263,8 +264,8 @@ vk::Viewport Swapchain::get_full_viewport() const {
     return vk::Viewport()
         .setX(0.0f)
         .setY(0.0f)
-        .setWidth((float)target_extent.width)
-        .setHeight((float)target_extent.height)
+        .setWidth(static_cast<float>(target_extent.width))
+        .setHeight(static_cast<float>(target_extent.height))
         .setMinDepth(0.0f)
         .setMaxDepth(1.0f);
 }

@@ -1,6 +1,9 @@
 #include "time.h"
-#include <GLFW/glfw3.h>
+#include <chrono>
 
-double get_current_time_seconds() {
-    return glfwGetTime();
+Instant Instant::now() {
+    auto clock = std::chrono::steady_clock::now();
+    auto nanoseconds = 
+        std::chrono::duration_cast<std::chrono::nanoseconds>(clock.time_since_epoch());
+    return {static_cast<uint64_t>(nanoseconds.count())};
 }

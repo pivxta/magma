@@ -6,7 +6,6 @@ struct SwapchainConfigureInfo {
     vk::PresentModeKHR present_mode = vk::PresentModeKHR::eMailbox;
     vk::ColorSpaceKHR colorspace = vk::ColorSpaceKHR::eSrgbNonlinear;
     vk::Format format = vk::Format::eB8G8R8A8Srgb;
-    vk::Extent2D extent{1, 1};
 
     SwapchainConfigureInfo& set_present_mode(vk::PresentModeKHR value) {
         this->present_mode = value;
@@ -20,11 +19,6 @@ struct SwapchainConfigureInfo {
 
     SwapchainConfigureInfo& set_format(vk::Format value) {
         this->format = value;
-        return *this;
-    }
-
-    SwapchainConfigureInfo& set_extent(vk::Extent2D value) {
-        this->extent = value;
         return *this;
     }
 };
@@ -42,7 +36,7 @@ class Target;
 class Swapchain {
 public:
     Swapchain();
-    Swapchain(vk::Instance instance, std::shared_ptr<Target> target);
+    Swapchain(vk::Instance instance, const std::shared_ptr<Target>& target);
     ~Swapchain();
 
     void destroy(vk::Device device);
