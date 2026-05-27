@@ -795,20 +795,20 @@ private:
             vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst,
             instances.size() * sizeof(instances[0])
         );
-        vk::DeviceSize uniform_stride = this->get_uniform_stride(sizeof(Uniforms));
+        uint32_t uniform_stride = this->get_uniform_stride(sizeof(Uniforms));
         auto [uniform_buffer, uniform_info, uniform_buffer_alloc] = this->create_buffer_mapped(
             vk::BufferUsageFlagBits::eUniformBuffer, 
             uniform_stride * FRAMES_IN_FLIGHT
         );
         vk::DeviceSize dir_lights_size = MAX_DIRECTIONAL_LIGHTS * sizeof(DirectionalLight);
-        vk::DeviceSize dir_lights_stride = this->get_storage_stride(dir_lights_size);
+        uint32_t dir_lights_stride = this->get_storage_stride(dir_lights_size);
         auto [dir_light_buffer, dir_light_info, dir_light_buffer_alloc] = 
             this->create_buffer_mapped(
                 vk::BufferUsageFlagBits::eStorageBuffer, 
                 dir_lights_stride * FRAMES_IN_FLIGHT
             );
         vk::DeviceSize point_lights_size = MAX_POINT_LIGHTS * sizeof(PointLight);
-        vk::DeviceSize point_lights_stride = this->get_storage_stride(point_lights_size);
+        uint32_t point_lights_stride = this->get_storage_stride(point_lights_size);
         auto [point_light_buffer, point_light_info, point_light_buffer_alloc] = 
             this->create_buffer_mapped(
                 vk::BufferUsageFlagBits::eStorageBuffer, 
@@ -870,14 +870,14 @@ private:
         vk::DeviceSize align =
             this->physical_device.getProperties().limits.minUniformBufferOffsetAlignment;
 
-        return (uniform_size + align - 1) & ~(align - 1);
+        return static_cast<uint32_t>((uniform_size + align - 1) & ~(align - 1));
     }
 
     uint32_t get_storage_stride(uint32_t storage_size) {
         vk::DeviceSize align =
             this->physical_device.getProperties().limits.minStorageBufferOffsetAlignment;
 
-        return (storage_size + align - 1) & ~(align - 1);
+        return static_cast<uint32_t>((storage_size + align - 1) & ~(align - 1));
     }
 
     void destroy_buffers() {
@@ -1188,7 +1188,11 @@ private:
         command_buffer.bindIndexBuffer(this->index_buffer, 0, vk::IndexType::eUint16);
         command_buffer.bindVertexBuffers(0, this->vertex_buffer, {0});
         command_buffer.bindVertexBuffers(1, this->instance_buffer, {0});
-        command_buffer.drawIndexed(this->index_count, this->instance_count, 0, 0, 0);
+        command_buffer.drawIndexed(
+            static_cast<uint32_t>(this->index_count), 
+            static_cast<uint32_t>(this->instance_count), 
+            0, 0, 0
+        );
         command_buffer.endRendering();
     }
 
