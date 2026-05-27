@@ -121,7 +121,7 @@ static inline std::vector<uint32_t> read_spirv_file(const std::filesystem::path&
         );
         return buffer;
     } catch (const std::exception& e) {
-        spdlog::error("Failed to open file '{}': {}", path.c_str(), e.what());
+        spdlog::error("Failed to open file '{}': {}", path.generic_string(), e.what());
         return {};
     }
 };
