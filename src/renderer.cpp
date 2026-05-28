@@ -134,6 +134,14 @@ struct UntypedBuffer {
 
     void destroy(vma::Allocator allocator) {
         allocator.destroyBuffer(this->buffer, this->allocation);
+        this->buffer = vk::Buffer();
+        this->allocation = vma::Allocation();
+        this->size = 0;
+        this->mapped = nullptr;
+    }
+
+    operator vk::Buffer() {
+        return this->buffer;
     }
 };
 
@@ -158,12 +166,12 @@ struct Buffer {
     UntypedBuffer buffer;
     vk::DeviceSize length;
 
-    vk::DeviceSize size_bytes() const {
-        return this->buffer.size;
+    operator vk::Buffer() const {
+        return this->buffer.buffer;
     }
 
-    vk::Buffer get() {
-        return this->buffer.buffer;
+    vk::DeviceSize size_bytes() const {
+        return this->buffer.size;
     }
 
     T* get_mapped() {
@@ -172,6 +180,7 @@ struct Buffer {
 
     void destroy(vma::Allocator allocator) {
         this->buffer.destroy(allocator);
+        this->length = 0;
     }
     
     vk::DescriptorBufferInfo descriptor_info(
@@ -180,7 +189,7 @@ struct Buffer {
     ) {
         vk::DeviceSize length = elems.value_or(this->length);
         return vk::DescriptorBufferInfo()
-            .setBuffer(this->get())
+            .setBuffer(*this)
             .setOffset(offset)
             .setRange(sizeof(T) * length);
     }
@@ -244,7 +253,7 @@ struct DynOffsetBuffer {
     vk::DeviceSize count;
     uint32_t stride;
 
-    vk::Buffer get() {
+    operator vk::Buffer() const {
         return this->buffer.buffer;
     }
 
@@ -271,6 +280,8 @@ struct DynOffsetBuffer {
 
     void destroy(vma::Allocator allocator) {
         this->buffer.destroy(allocator);
+        this->count = 0;
+        this->length = 0;
     }
 
     vk::DescriptorBufferInfo descriptor_info(
@@ -279,7 +290,7 @@ struct DynOffsetBuffer {
     ) {
         vk::DeviceSize length = elems.value_or(this->length);
         return vk::DescriptorBufferInfo()
-            .setBuffer(this->get())
+            .setBuffer(*this)
             .setOffset(offset)
             .setRange(sizeof(T) * length);
     }
@@ -321,11 +332,83 @@ static DynOffsetBuffer<T> create_dyn_offset_buffer(
 
 struct ImageTexture {
     vk::Image image;
-    vk::ImageView view;
     vma::Allocation allocation;
+    vk::ImageView view;
 
+    uint32_t mip_levels;
+    vk::Extent3D extent;
     vk::Format format;
+
+    operator vk::Image() const {
+        return this->image;
+    }
+
+    bool is_null() const {
+        return this->image == vk::Image();
+    }
+
+    void destroy(vk::Device device, vma::Allocator allocator) {
+        device.destroyImageView(this->view);
+        allocator.destroyImage(this->image, this->allocation);
+    }
 };
+
+static vk::ImageAspectFlags get_default_aspect_flags(vk::Format format) {
+    switch (format) {
+        case vk::Format::eD16Unorm:
+        case vk::Format::eX8D24UnormPack32:
+        case vk::Format::eD32Sfloat:
+            return vk::ImageAspectFlagBits::eDepth;
+
+        case vk::Format::eS8Uint:
+            return vk::ImageAspectFlagBits::eStencil;
+
+        case vk::Format::eD16UnormS8Uint:
+        case vk::Format::eD24UnormS8Uint:
+        case vk::Format::eD32SfloatS8Uint:
+            return vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil;
+
+        default:
+            return vk::ImageAspectFlagBits::eColor;
+    }
+}
+
+static ImageTexture create_image(
+    vk::Device device,
+    vma::Allocator allocator,
+    const vk::ImageCreateInfo& info
+) {
+    auto alloc_info = vma::AllocationCreateInfo().setUsage(vma::MemoryUsage::eGpuOnly);
+    auto [result1, resources] = allocator.createImage(info, alloc_info);
+    vk_expect(result1, "Failed to create image");
+    auto [alloc, image] = resources;
+
+    auto [result2, view] = device.createImageView(
+        vk::ImageViewCreateInfo()
+            .setImage(image)
+            .setFormat(info.format)
+            .setComponents(vk::ComponentMapping())
+            .setViewType(vk::ImageViewType::e2D)
+            .setSubresourceRange(
+                vk::ImageSubresourceRange()
+                    .setAspectMask(get_default_aspect_flags(info.format))
+                    .setBaseArrayLayer(0)
+                    .setLayerCount(1)
+                    .setBaseMipLevel(0)
+                    .setLevelCount(info.mipLevels)
+            )
+    );
+    vk_expect(result2, "Failed to create image view");
+
+    return {
+        .image = resources.second,
+        .allocation = resources.first,
+        .view = view,
+        .mip_levels = info.mipLevels,
+        .extent = info.extent,
+        .format = info.format,
+    };
+}
 
 struct Renderer::Inner {
     static constexpr uint32_t FRAMES_IN_FLIGHT = 2;
@@ -348,7 +431,11 @@ struct Renderer::Inner {
         this->create_sync_primitives();
         this->create_command_pool();
         this->allocate_command_buffers();
-        this->load_images();
+        if (auto image = Image::load("../images/rocks.jpg"); image != std::nullopt) {
+            this->upload_image(*image);
+        } else {
+            spdlog::error("Failed to load image");
+        }
         this->create_buffers();
         this->create_descriptor_pool();
         this->create_descriptor_set();
@@ -719,174 +806,77 @@ private:
     void create_depth_image(uint32_t frame_index) {
         if (this->depth_images.size() != FRAMES_IN_FLIGHT) {
             this->depth_images.resize(FRAMES_IN_FLIGHT);
-            this->depth_views.resize(FRAMES_IN_FLIGHT);
-            this->depth_image_allocs.resize(FRAMES_IN_FLIGHT);
         }
 
-        vk::Format format = vk::Format::eD32Sfloat;
-
-        auto image_info = vk::ImageCreateInfo()
-            .setImageType(vk::ImageType::e2D)
-            .setExtent(vk::Extent3D(this->swapchain.get_extent(), 1))
-            .setFormat(format)
-            .setUsage(vk::ImageUsageFlagBits::eDepthStencilAttachment)
-            .setMipLevels(1)
-            .setArrayLayers(1)
-            .setSamples(vk::SampleCountFlagBits::e1)
-            .setQueueFamilyIndices(this->queue_family_index)
-            .setInitialLayout(vk::ImageLayout::eUndefined)
-            .setSharingMode(vk::SharingMode::eExclusive)
-            .setTiling(vk::ImageTiling::eOptimal);
-        auto alloc_info = vma::AllocationCreateInfo().setUsage(vma::MemoryUsage::eGpuOnly);
-
-        vma::AllocationInfo alloc_stats;
-        auto [result1, pair] = this->allocator.createImage(image_info, alloc_info, alloc_stats);
-        vk_expect(result1, "Failed to create depth texture");
-
-        auto [alloc, image] = pair;
-        auto [result2, view] = device.createImageView(
-            vk::ImageViewCreateInfo()
-                .setImage(image)
-                .setFormat(format)
-                .setComponents(vk::ComponentMapping())
-                .setViewType(vk::ImageViewType::e2D)
-                .setSubresourceRange(
-                    vk::ImageSubresourceRange()
-                        .setAspectMask(vk::ImageAspectFlagBits::eDepth)
-                        .setBaseMipLevel(0)
-                        .setLevelCount(1)
-                        .setBaseArrayLayer(0)
-                        .setLayerCount(1)
-                )
+        ImageTexture image = this->create_image(
+            vk::ImageCreateInfo()
+                .setImageType(vk::ImageType::e2D)
+                .setExtent(vk::Extent3D(this->swapchain.get_extent(), 1))
+                .setFormat(vk::Format::eD32Sfloat)
+                .setUsage(vk::ImageUsageFlagBits::eDepthStencilAttachment)
+                .setMipLevels(1)
+                .setArrayLayers(1)
+                .setSamples(vk::SampleCountFlagBits::e1)
+                .setQueueFamilyIndices(this->queue_family_index)
+                .setInitialLayout(vk::ImageLayout::eUndefined)
+                .setSharingMode(vk::SharingMode::eExclusive)
+                .setTiling(vk::ImageTiling::eOptimal)
         );
-        vk_expect(result2, "Failed to create depth image view");
 
-        if (this->depth_images[frame_index] != vk::Image()) {
-            this->device.destroyImageView(this->depth_views[frame_index]);
-            this->allocator.destroyImage(
-                this->depth_images[frame_index],
-                this->depth_image_allocs[frame_index]
-            );
+        if (!this->depth_images[frame_index].is_null()) {
+            this->depth_images[frame_index].destroy(this->device, this->allocator);
         }
 
         this->depth_images[frame_index] = image;
-        this->depth_views[frame_index] = view;
-        this->depth_image_allocs[frame_index] = alloc;
     }
 
     void destroy_depth_images() {
         for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
-            if (this->depth_images[i] != vk::Image()) {
-                this->device.destroyImageView(this->depth_views[i]);
-                this->allocator.destroyImage(
-                    this->depth_images[i], 
-                    this->depth_image_allocs[i]
-                );
+            if (!this->depth_images[i].is_null()) {
+                this->depth_images[i].destroy(this->device, this->allocator);
             }
         }
     }
 
-    void load_images() {
-        int width, height, components;
-        uint8_t* image_bytes = stbi_load("../images/rocks.jpg", &width, &height, &components, 4);
-        if (image_bytes == nullptr) {
-            spdlog::critical("Failed to load image");
-            std::exit(1);
+    void upload_image(const Image& src) {
+        uint32_t mip_levels = static_cast<uint32_t>(std::log2(std::max(src.width, src.height))) + 1;
+        vk::Extent3D extent = vk::Extent3D(src.width, src.height, 1);
+        vk::Format format;
+        switch (src.components) {
+            case 1: format = vk::Format::eR8Srgb; break;
+            case 2: format = vk::Format::eR8G8Srgb; break;
+            case 3: format = vk::Format::eR8G8B8Srgb; break;
+            case 4: format = vk::Format::eR8G8B8A8Srgb; break;
+            default:
+                spdlog::error("Failed to upload image");
+                return;
         }
-
-        vk::Extent3D extent = vk::Extent3D(width, height, 1);
-        vk::Format format = vk::Format::eR8G8B8A8Srgb;
-        auto image_info = vk::ImageCreateInfo()
-            .setImageType(vk::ImageType::e2D)
-            .setExtent(extent)
-            .setFormat(format)
-            .setMipLevels(1)
-            .setArrayLayers(1)
-            .setSamples(vk::SampleCountFlagBits::e1)
-            .setQueueFamilyIndices(this->queue_family_index)
-            .setUsage(vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled)
-            .setInitialLayout(vk::ImageLayout::eUndefined)
-            .setSharingMode(vk::SharingMode::eExclusive)
-            .setTiling(vk::ImageTiling::eOptimal);
-
-        auto alloc_info = vma::AllocationCreateInfo().setUsage(vma::MemoryUsage::eGpuOnly);
-
-        vma::AllocationInfo alloc_stats;
-        auto [result1, pair]= this->allocator.createImage(image_info, alloc_info, alloc_stats);
-        vk_expect(result1, "Failed to create image");
-        auto [alloc, image] = pair;
+        ImageTexture image = this->create_image(
+            vk::ImageCreateInfo()
+                .setImageType(vk::ImageType::e2D)
+                .setExtent(extent)
+                .setFormat(format)
+                .setMipLevels(mip_levels)
+                .setArrayLayers(1)
+                .setSamples(vk::SampleCountFlagBits::e1)
+                .setQueueFamilyIndices(this->queue_family_index)
+                .setUsage(vk::ImageUsageFlagBits::eTransferDst 
+                    | vk::ImageUsageFlagBits::eTransferSrc
+                    | vk::ImageUsageFlagBits::eSampled)
+                .setInitialLayout(vk::ImageLayout::eUndefined)
+                .setSharingMode(vk::SharingMode::eExclusive)
+                .setTiling(vk::ImageTiling::eOptimal)
+        );
 
         auto staging = this->create_mapped_buffer_init<uint8_t>(
-            vk::BufferUsageFlagBits::eTransferSrc,
-            std::span(image_bytes, static_cast<size_t>(width) * static_cast<size_t>(height) * 4)
+            vk::BufferUsageFlagBits::eTransferSrc, src.bytes
         );
-        stbi_image_free(image_bytes);
-
-        auto subresource_range = vk::ImageSubresourceRange()
-            .setAspectMask(vk::ImageAspectFlagBits::eColor)
-            .setBaseMipLevel(0)
-            .setLevelCount(1)
-            .setBaseArrayLayer(0)
-            .setLayerCount(1);
 
         vk::CommandBuffer command_buffer = this->begin_one_shot_commands();
-
-        this->record_image_barrier(
-            command_buffer,
-            vk::ImageMemoryBarrier2()
-                .setImage(image)
-                .setSrcStageMask(vk::PipelineStageFlagBits2::eNone)
-                .setSrcAccessMask(vk::AccessFlagBits2::eNone)
-                .setDstStageMask(vk::PipelineStageFlagBits2::eTransfer)
-                .setDstAccessMask(vk::AccessFlagBits2::eTransferWrite)
-                .setOldLayout(vk::ImageLayout::eUndefined)
-                .setNewLayout(vk::ImageLayout::eTransferDstOptimal)
-                .setSubresourceRange(subresource_range)
-        );
-        
-        command_buffer.copyBufferToImage(
-            staging.get(), 
-            image, 
-            vk::ImageLayout::eTransferDstOptimal,
-            {
-                vk::BufferImageCopy()
-                    .setImageExtent(extent)
-                    .setImageSubresource(
-                        vk::ImageSubresourceLayers()
-                            .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                            .setBaseArrayLayer(0)
-                            .setLayerCount(1)
-                            .setMipLevel(0)
-                    )
-            }
-        );
-
-        this->record_image_barrier(
-            command_buffer,
-            vk::ImageMemoryBarrier2()
-                .setImage(image)
-                .setSrcStageMask(vk::PipelineStageFlagBits2::eTransfer)
-                .setSrcAccessMask(vk::AccessFlagBits2::eNone)
-                .setDstStageMask(vk::PipelineStageFlagBits2::eFragmentShader)
-                .setDstAccessMask(vk::AccessFlagBits2::eShaderSampledRead)
-                .setOldLayout(vk::ImageLayout::eTransferDstOptimal)
-                .setNewLayout(vk::ImageLayout::eShaderReadOnlyOptimal)
-                .setSubresourceRange(subresource_range)
-        );
-
+        this->record_buffer_to_image_copy(command_buffer, image, staging);
+        this->record_image_mip_generation(command_buffer, image);
         this->submit_one_shot_commands_sync(command_buffer);
-        
         staging.destroy(this->allocator);
-
-        auto [result2, view] = device.createImageView(
-            vk::ImageViewCreateInfo()
-                .setImage(image)
-                .setFormat(format)
-                .setComponents(vk::ComponentMapping())
-                .setViewType(vk::ImageViewType::e2D)
-                .setSubresourceRange(subresource_range)
-        );
-        vk_expect(result2, "Failed to create image view");
 
         auto [result3, sampler] = device.createSampler(
             vk::SamplerCreateInfo()
@@ -902,19 +892,185 @@ private:
         );
 
         this->image = image;
-        this->image_view = view;
-        this->image_sampler = sampler;
-        this->image_alloc = alloc;
+        this->sampler = sampler;
+    }
+
+    void record_buffer_to_image_copy(
+        vk::CommandBuffer command_buffer, 
+        const ImageTexture& image, 
+        const Buffer<uint8_t>& staging
+    ) {
+        this->record_image_barrier(
+            command_buffer,
+            vk::ImageMemoryBarrier2()
+                .setImage(image) 
+                .setSrcStageMask(vk::PipelineStageFlagBits2::eNone)
+                .setSrcAccessMask(vk::AccessFlagBits2::eNone)
+                .setDstStageMask(vk::PipelineStageFlagBits2::eTransfer)
+                .setDstAccessMask(vk::AccessFlagBits2::eTransferWrite)
+                .setOldLayout(vk::ImageLayout::eUndefined)
+                .setNewLayout(vk::ImageLayout::eTransferDstOptimal)
+                .setSubresourceRange(
+                    vk::ImageSubresourceRange()
+                        .setAspectMask(vk::ImageAspectFlagBits::eColor)
+                        .setBaseMipLevel(0)
+                        .setLevelCount(1)
+                        .setBaseArrayLayer(0)
+                        .setLayerCount(1)
+                )
+        );
+        
+        command_buffer.copyBufferToImage(
+            staging, 
+            image, 
+            vk::ImageLayout::eTransferDstOptimal,
+            {
+                vk::BufferImageCopy()
+                    .setImageExtent(image.extent)
+                    .setImageSubresource(
+                        vk::ImageSubresourceLayers()
+                            .setAspectMask(vk::ImageAspectFlagBits::eColor)
+                            .setBaseArrayLayer(0)
+                            .setLayerCount(1)
+                            .setMipLevel(0)
+                    )
+            }
+        );
+    }
+
+    void record_image_mip_generation(
+        vk::CommandBuffer command_buffer, 
+        const ImageTexture& image
+    ) {
+        for (uint32_t mip_level = 1; mip_level < image.mip_levels; mip_level++) {
+            this->record_image_barrier(
+                command_buffer,
+                vk::ImageMemoryBarrier2()
+                    .setImage(image)
+                    .setSrcStageMask(vk::PipelineStageFlagBits2::eTransfer)
+                    .setSrcAccessMask(vk::AccessFlagBits2::eTransferWrite)
+                    .setDstStageMask(vk::PipelineStageFlagBits2::eBlit)
+                    .setDstAccessMask(vk::AccessFlagBits2::eTransferRead)
+                    .setOldLayout(vk::ImageLayout::eTransferDstOptimal)
+                    .setNewLayout(vk::ImageLayout::eTransferSrcOptimal)
+                    .setSubresourceRange(
+                        vk::ImageSubresourceRange()
+                            .setAspectMask(vk::ImageAspectFlagBits::eColor)
+                            .setBaseMipLevel(mip_level - 1)
+                            .setLevelCount(1)
+                            .setBaseArrayLayer(0)
+                            .setLayerCount(1)
+                    )
+            );
+            this->record_image_barrier(
+                command_buffer,
+                vk::ImageMemoryBarrier2()
+                    .setImage(image)
+                    .setSrcStageMask(vk::PipelineStageFlagBits2::eTransfer)
+                    .setSrcAccessMask(vk::AccessFlagBits2::eNone)
+                    .setDstStageMask(vk::PipelineStageFlagBits2::eBlit)
+                    .setDstAccessMask(vk::AccessFlagBits2::eTransferWrite)
+                    .setOldLayout(vk::ImageLayout::eUndefined)
+                    .setNewLayout(vk::ImageLayout::eTransferDstOptimal)
+                    .setSubresourceRange(
+                        vk::ImageSubresourceRange()
+                            .setAspectMask(vk::ImageAspectFlagBits::eColor)
+                            .setBaseMipLevel(mip_level)
+                            .setLevelCount(1)
+                            .setBaseArrayLayer(0)
+                            .setLayerCount(1)
+                    )
+            );
+
+            uint32_t src_width = image.extent.width >> (mip_level - 1);
+            uint32_t src_height = image.extent.height >> (mip_level - 1);
+            uint32_t dst_width = image.extent.width >> mip_level;
+            uint32_t dst_height = image.extent.height >> mip_level;
+
+            std::array<vk::Offset3D, 2> src_offsets = {
+                vk::Offset3D(0, 0, 0), 
+                vk::Offset3D(src_width, src_height, 1)
+            };
+            auto src_subresource = vk::ImageSubresourceLayers()
+                .setAspectMask(vk::ImageAspectFlagBits::eColor)
+                .setBaseArrayLayer(0)
+                .setLayerCount(1)
+                .setMipLevel(mip_level - 1);
+
+            std::array<vk::Offset3D, 2> dst_offsets = {
+                vk::Offset3D(0, 0, 0), 
+                vk::Offset3D(dst_width, dst_height, 1)
+            };
+            auto dst_subresource = vk::ImageSubresourceLayers()
+                .setAspectMask(vk::ImageAspectFlagBits::eColor)
+                .setBaseArrayLayer(0)
+                .setLayerCount(1)
+                .setMipLevel(mip_level);
+            auto regions = vk::ImageBlit2()
+                .setSrcSubresource(src_subresource)
+                .setSrcOffsets(src_offsets)
+                .setDstSubresource(dst_subresource)
+                .setDstOffsets(dst_offsets);
+
+            command_buffer.blitImage2(
+                vk::BlitImageInfo2()
+                    .setSrcImage(image)   
+                    .setSrcImageLayout(vk::ImageLayout::eTransferSrcOptimal)
+                    .setDstImage(image)   
+                    .setDstImageLayout(vk::ImageLayout::eTransferDstOptimal)
+                    .setFilter(vk::Filter::eLinear)
+                    .setRegions(regions)
+            );
+
+            this->record_image_barrier(
+                command_buffer,
+                vk::ImageMemoryBarrier2()
+                    .setImage(image)
+                    .setSrcStageMask(vk::PipelineStageFlagBits2::eBlit)
+                    .setSrcAccessMask(vk::AccessFlagBits2::eTransferRead)
+                    .setDstStageMask(vk::PipelineStageFlagBits2::eFragmentShader)
+                    .setDstAccessMask(vk::AccessFlagBits2::eShaderSampledRead)
+                    .setOldLayout(vk::ImageLayout::eTransferSrcOptimal)
+                    .setNewLayout(vk::ImageLayout::eShaderReadOnlyOptimal)
+                    .setSubresourceRange(
+                        vk::ImageSubresourceRange()
+                            .setAspectMask(vk::ImageAspectFlagBits::eColor)
+                            .setBaseMipLevel(mip_level - 1)
+                            .setLevelCount(1)
+                            .setBaseArrayLayer(0)
+                            .setLayerCount(1)
+                    )
+            );
+        }
+
+        this->record_image_barrier(
+            command_buffer,
+            vk::ImageMemoryBarrier2()
+                .setImage(image)
+                .setSrcStageMask(vk::PipelineStageFlagBits2::eBlit)
+                .setSrcAccessMask(vk::AccessFlagBits2::eTransferWrite)
+                .setDstStageMask(vk::PipelineStageFlagBits2::eFragmentShader)
+                .setDstAccessMask(vk::AccessFlagBits2::eShaderSampledRead)
+                .setOldLayout(vk::ImageLayout::eTransferDstOptimal)
+                .setNewLayout(vk::ImageLayout::eShaderReadOnlyOptimal)
+                .setSubresourceRange(
+                    vk::ImageSubresourceRange()
+                        .setAspectMask(vk::ImageAspectFlagBits::eColor)
+                        .setBaseMipLevel(image.mip_levels - 1)
+                        .setLevelCount(1)
+                        .setBaseArrayLayer(0)
+                        .setLayerCount(1)
+                )
+        );
     }
 
     void destroy_images() {
-        this->device.destroySampler(this->image_sampler);
-        this->device.destroyImageView(this->image_view);
-        this->allocator.destroyImage(this->image, this->image_alloc);
+        this->device.destroySampler(this->sampler);
+        this->image.destroy(this->device, this->allocator);
     }
 
     void create_buffers() {
-        const int layers = 2;
+        const int layers = 32;
         const int rows = 32;
         const int columns = 32;
         const float spacing = 2.0f;
@@ -1019,18 +1175,18 @@ private:
 
         vk::CommandBuffer command_buffer = this->begin_one_shot_commands();
         command_buffer.copyBuffer(
-            vertex_staging.get(),
-            vertex_buffer.get(),
+            vertex_staging,
+            vertex_buffer,
             vk::BufferCopy().setSize(vertex_buffer.size_bytes())
         );
         command_buffer.copyBuffer(
-            index_staging.get(),
-            index_buffer.get(), 
+            index_staging,
+            index_buffer, 
             vk::BufferCopy().setSize(index_buffer.size_bytes())
         );
         command_buffer.copyBuffer(
-            instance_staging.get(),
-            instance_buffer.get(),
+            instance_staging,
+            instance_buffer,
             vk::BufferCopy().setSize(instance_buffer.size_bytes())
         );
         this->submit_one_shot_commands_sync(command_buffer);
@@ -1071,6 +1227,10 @@ private:
         return ::create_mapped_buffer_init<T>(this->allocator, usage, data);
     }
 
+    ImageTexture create_image(const vk::ImageCreateInfo& info) {
+        return ::create_image(this->device, this->allocator, info);
+    }
+
     template<typename T>
     DynOffsetBuffer<T> create_dyn_offset_buffer(
         vk::BufferUsageFlags usage, 
@@ -1079,63 +1239,6 @@ private:
     ) {
         return ::create_dyn_offset_buffer<T>(this->allocator, usage, length, count);
     }
-
-    /*
-    std::tuple<vk::Buffer, vma::Allocation> create_buffer(
-        vk::BufferUsageFlags usage, 
-        vk::DeviceSize buffer_size
-    ) {
-        std::vector<vk::Buffer> buffers;
-        auto buffer_info = vk::BufferCreateInfo()
-            .setSize(buffer_size)
-            .setUsage(usage)
-            .setSharingMode(vk::SharingMode::eExclusive);
-        auto alloc_info = vma::AllocationCreateInfo().setUsage(vma::MemoryUsage::eGpuOnly);
-
-        vma::AllocationInfo alloc_stats;
-        auto [result, resource] =
-            this->allocator.createBuffer(buffer_info, alloc_info, alloc_stats);
-        vk_expect(result, "Failed to allocate buffer");
-
-        auto [alloc, buffer] = resource;
-        return {buffer, alloc};
-    }
-
-    std::tuple<vk::Buffer, vma::Allocation> create_buffer_staging(void* data, size_t size) {
-        auto [buffer, alloc_info, alloc] =
-            create_buffer_mapped(vk::BufferUsageFlagBits::eTransferSrc, size);
-        memcpy(alloc_info.pMappedData, data, size);
-        vk_expect(
-            this->allocator.flushAllocation(alloc, 0, size), 
-            "Failed to flush memory allocation"
-        );
-        return {buffer, alloc};
-    }
-
-    std::tuple<vk::Buffer, vma::AllocationInfo, vma::Allocation> create_buffer_mapped(
-        vk::BufferUsageFlags usage, 
-        vk::DeviceSize buffer_size
-    ) {
-        auto buffer_info = vk::BufferCreateInfo()
-            .setSize(buffer_size)
-            .setUsage(usage)
-            .setSharingMode(vk::SharingMode::eExclusive);
-
-        auto alloc_info = vma::AllocationCreateInfo()
-            .setUsage(vma::MemoryUsage::eAuto)
-            .setFlags(
-                vma::AllocationCreateFlagBits::eHostAccessSequentialWrite 
-                    | vma::AllocationCreateFlagBits::eMapped
-            );
-
-        vma::AllocationInfo alloc_stats;
-        auto [result, resource] =
-            this->allocator.createBuffer(buffer_info, alloc_info, alloc_stats);
-        vk_expect(result, "Failed to allocate buffer");
-
-        auto [alloc, buffer] = resource;
-        return {buffer, alloc_stats, alloc};
-    }*/
 
     void create_descriptor_pool() {
         std::array pool_sizes = {
@@ -1218,8 +1321,8 @@ private:
             .setBufferInfo(point_light_buffer_info);
 
         auto image_info = vk::DescriptorImageInfo()
-            .setImageView(this->image_view)
-            .setSampler(this->image_sampler)
+            .setImageView(this->image.view)
+            .setSampler(this->sampler)
             .setImageLayout(vk::ImageLayout::eShaderReadOnlyOptimal);
         auto write_image = vk::WriteDescriptorSet()
             .setDstSet(descriptor_sets[0])
@@ -1331,7 +1434,7 @@ private:
             .setStoreOp(vk::AttachmentStoreOp::eStore);
 
         auto depth_attachment = vk::RenderingAttachmentInfo()
-            .setImageView(this->depth_views[this->frame_index])
+            .setImageView(this->depth_images[this->frame_index].view)
             .setImageLayout(vk::ImageLayout::eDepthAttachmentOptimal)
             .setClearValue(vk::ClearDepthStencilValue(0.0f))
             .setLoadOp(vk::AttachmentLoadOp::eClear)
@@ -1357,9 +1460,9 @@ private:
                 this->point_light_buffer.offset(this->frame_index)
             }
         );
-        command_buffer.bindIndexBuffer(this->index_buffer.get(), 0, vk::IndexType::eUint16);
-        command_buffer.bindVertexBuffers(0, this->vertex_buffer.get(), {0});
-        command_buffer.bindVertexBuffers(1, this->instance_buffer.get(), {0});
+        command_buffer.bindIndexBuffer(this->index_buffer, 0, vk::IndexType::eUint16);
+        command_buffer.bindVertexBuffers(0, (vk::Buffer)this->vertex_buffer, {0});
+        command_buffer.bindVertexBuffers(1, (vk::Buffer)this->instance_buffer, {0});
         command_buffer.drawIndexed(
             static_cast<uint32_t>(this->index_buffer.length), 
             static_cast<uint32_t>(this->instance_buffer.length), 
@@ -1461,9 +1564,7 @@ private:
     SwapchainConfigureInfo swapchain_info;
     bool should_reconfigure_swapchain = false;
 
-    std::vector<vk::Image> depth_images; // One per frame in flight
-    std::vector<vk::ImageView> depth_views;
-    std::vector<VmaAllocation> depth_image_allocs;
+    std::vector<ImageTexture> depth_images;
 
     std::vector<vk::Fence> fences;              // One per frame in flight
     std::vector<vk::Semaphore> image_availible; // One per frame in flight
@@ -1488,10 +1589,8 @@ private:
     Buffer<Vertex> vertex_buffer;
     Buffer<uint16_t> index_buffer;
 
-    vk::Image image;
-    vk::ImageView image_view;
-    vk::Sampler image_sampler;
-    vma::Allocation image_alloc;
+    ImageTexture image;
+    vk::Sampler sampler;
 
     Camera camera;
     glm::vec3 ambient_light_color = glm::vec3(0.5f);

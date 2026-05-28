@@ -11,6 +11,7 @@
 #include "renderer.h"
 #include "performance.h"
 #include "time.h"
+#include "image.h"
 
 struct ControllerSettings {
     float max_movement_speed = 3.0f;
