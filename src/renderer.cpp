@@ -319,7 +319,7 @@ static DynOffsetBuffer<T> create_dyn_offset_buffer(
     };
 }
 
-struct Image {
+struct ImageTexture {
     vk::Image image;
     vk::ImageView view;
     vma::Allocation allocation;
