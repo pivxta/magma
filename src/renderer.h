@@ -5,6 +5,7 @@
 
 class Target;
 struct Camera;
+struct Image;
 
 class Renderer {
 public:
@@ -16,8 +17,10 @@ public:
     Renderer& operator=(Renderer&& other) noexcept;
 
     void resize();
-
     void set_camera(const Camera& world_to_clip);
+
+    void upload_image(const Image& image);
+
     void draw_frame();
 
 private:

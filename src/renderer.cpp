@@ -1,10 +1,11 @@
 #define VMA_IMPLEMENTATION
-#define STB_IMAGE_IMPLEMENTATION
 #include "renderer.h"
 #include "swapchain.h"
 #include "vkerror.h"
+#include "stb_image.h"
 #include "target.h"
 #include "camera.h"
+#include "image.h"
 #include <vector>
 #include <optional>
 #include <iostream>
@@ -17,7 +18,6 @@
 #include <glm/mat4x4.hpp>
 #include <glm/mat4x3.hpp>
 #include <glm/gtc/quaternion.hpp>
-#include <stb_image.h>
 #include <vulkan/vulkan.hpp>
 
 static constexpr size_t MAX_POINT_LIGHTS = 256;
@@ -126,6 +126,207 @@ static inline std::vector<uint32_t> read_spirv_file(const std::filesystem::path&
     }
 };
 
+struct UntypedBuffer {
+    vk::Buffer buffer;
+    vma::Allocation allocation;
+    vk::DeviceSize size;
+    void *mapped;
+
+    void destroy(vma::Allocator allocator) {
+        allocator.destroyBuffer(this->buffer, this->allocation);
+    }
+};
+
+static UntypedBuffer create_untyped_buffer(
+    vma::Allocator allocator,
+    const vk::BufferCreateInfo& buffer_info,
+    const vma::AllocationCreateInfo& alloc_info
+) {
+    vma::AllocationInfo info;
+    auto [result, resources] = allocator.createBuffer(buffer_info, alloc_info, &info);
+    vk_expect(result, "Failed to create buffer");
+    return {
+        .buffer = resources.second,
+        .allocation = resources.first,
+        .size = buffer_info.size,
+        .mapped = info.pMappedData
+    };
+}
+
+template<typename T>
+struct Buffer {
+    UntypedBuffer buffer;
+    vk::DeviceSize length;
+
+    vk::DeviceSize size_bytes() const {
+        return this->buffer.size;
+    }
+
+    vk::Buffer get() {
+        return this->buffer.buffer;
+    }
+
+    T* get_mapped() {
+        return reinterpret_cast<T*>(this->buffer.mapped);
+    }
+
+    void destroy(vma::Allocator allocator) {
+        this->buffer.destroy(allocator);
+    }
+    
+    vk::DescriptorBufferInfo descriptor_info(
+        vk::DeviceSize offset = 0,
+        std::optional<vk::DeviceSize> elems = std::nullopt
+    ) {
+        vk::DeviceSize length = elems.value_or(this->length);
+        return vk::DescriptorBufferInfo()
+            .setBuffer(this->get())
+            .setOffset(offset)
+            .setRange(sizeof(T) * length);
+    }
+};
+
+template<typename T>
+static Buffer<T> create_gpu_buffer(
+    vma::Allocator allocator,
+    vk::BufferUsageFlags usage, 
+    vk::DeviceSize length
+) {
+    UntypedBuffer buffer = create_untyped_buffer(
+        allocator,
+        vk::BufferCreateInfo()
+            .setSharingMode(vk::SharingMode::eExclusive)
+            .setSize(length * sizeof(T))
+            .setUsage(usage),
+        vma::AllocationCreateInfo()
+            .setUsage(vma::MemoryUsage::eGpuOnly)
+    );
+    return {buffer, length};
+}
+
+template<typename T>
+static Buffer<T> create_mapped_buffer(
+    vma::Allocator allocator,
+    vk::BufferUsageFlags usage, 
+    vk::DeviceSize length
+) {
+    UntypedBuffer buffer = create_untyped_buffer(
+        allocator,
+        vk::BufferCreateInfo()
+            .setSharingMode(vk::SharingMode::eExclusive)
+            .setSize(length * sizeof(T))
+            .setUsage(usage),
+        vma::AllocationCreateInfo()
+            .setFlags(
+                vma::AllocationCreateFlagBits::eHostAccessSequentialWrite
+                    | vma::AllocationCreateFlagBits::eMapped
+            )
+            .setUsage(vma::MemoryUsage::eAuto)
+    );
+    return {buffer, length};
+}
+
+template<typename T>
+static Buffer<T> create_mapped_buffer_init(
+    vma::Allocator allocator,
+    vk::BufferUsageFlags usage, 
+    std::span<const T> data
+) {
+    Buffer buffer = create_mapped_buffer<T>(allocator, usage, data.size());
+    memcpy(buffer.get_mapped(), data.data(), data.size_bytes());
+    return buffer;
+}
+
+template<typename T>
+struct DynOffsetBuffer {
+    UntypedBuffer buffer;
+    vk::DeviceSize length;
+    vk::DeviceSize count;
+    uint32_t stride;
+
+    vk::Buffer get() {
+        return this->buffer.buffer;
+    }
+
+    uint32_t offset(uint32_t frame_index) const {
+        return static_cast<uint32_t>(this->stride) 
+            * static_cast<uint32_t>(frame_index);;
+    }
+
+    T* get_mapped(uint32_t frame_index) {
+        return reinterpret_cast<T*>(
+            reinterpret_cast<uint8_t*>(this->buffer.mapped) 
+                + static_cast<size_t>(this->stride) * static_cast<size_t>(frame_index)
+        );
+    }
+
+    void write_one(uint32_t frame_index, std::span<const T> data) {
+        size_t write_size = data.size_bytes();
+        if (write_size > this->stride) {
+            write_size = this->stride;
+            spdlog::warn("Write size of dynamic offset buffer higher than the stride");
+        }
+        std::memcpy(this->get_mapped(frame_index), data.data(), write_size);
+    }
+
+    void destroy(vma::Allocator allocator) {
+        this->buffer.destroy(allocator);
+    }
+
+    vk::DescriptorBufferInfo descriptor_info(
+        vk::DeviceSize offset = 0,
+        std::optional<vk::DeviceSize> elems = std::nullopt
+    ) {
+        vk::DeviceSize length = elems.value_or(this->length);
+        return vk::DescriptorBufferInfo()
+            .setBuffer(this->get())
+            .setOffset(offset)
+            .setRange(sizeof(T) * length);
+    }
+};
+
+template<typename T>
+static DynOffsetBuffer<T> create_dyn_offset_buffer(
+    vma::Allocator allocator,
+    vk::BufferUsageFlags usage, 
+    vk::DeviceSize length,
+    vk::DeviceSize count
+) {
+    auto props = allocator.getPhysicalDeviceProperties();
+    vk::DeviceSize align = std::max(
+        props->limits.minStorageBufferOffsetAlignment,
+        props->limits.minUniformBufferOffsetAlignment
+    );
+    vk::DeviceSize stride = (length * sizeof(T) + align - 1) & ~(align - 1);
+    UntypedBuffer buffer = create_untyped_buffer(
+        allocator,
+        vk::BufferCreateInfo()
+            .setSharingMode(vk::SharingMode::eExclusive)
+            .setSize(stride * count)
+            .setUsage(usage),
+        vma::AllocationCreateInfo()
+            .setFlags(
+                vma::AllocationCreateFlagBits::eHostAccessSequentialWrite
+                    | vma::AllocationCreateFlagBits::eMapped
+            )
+            .setUsage(vma::MemoryUsage::eAuto)
+    );
+    return {
+        .buffer = buffer, 
+        .length = length, 
+        .count = count, 
+        .stride = static_cast<uint32_t>(stride)
+    };
+}
+
+struct Image {
+    vk::Image image;
+    vk::ImageView view;
+    vma::Allocation allocation;
+
+    vk::Format format;
+};
+
 struct Renderer::Inner {
     static constexpr uint32_t FRAMES_IN_FLIGHT = 2;
 
@@ -173,8 +374,7 @@ struct Renderer::Inner {
     }
 
     void set_camera(const Camera& camera) {
-        this->world_to_clip_matrix = camera.world_to_clip();
-        this->view_position = camera.translation;
+        this->camera = camera;
     }
 
     void resize() {
@@ -196,13 +396,7 @@ struct Renderer::Inner {
         }
 
         this->update_lights();
-        this->set_mapped_uniforms(Uniforms{
-            .world_to_clip = this->world_to_clip_matrix,
-            .view_position = this->view_position,
-            .ambient_light_color = this->ambient_light_color,
-            .point_lights = static_cast<uint32_t>(this->point_lights.size()),
-            .directional_lights = static_cast<uint32_t>(this->directional_lights.size()),
-        });
+        this->set_mapped_uniforms();
 
         vk::CommandBuffer command_buffer = this->begin_frame_commands();
         this->record_frame_commands(command_buffer, image);
@@ -622,9 +816,9 @@ private:
         vk_expect(result1, "Failed to create image");
         auto [alloc, image] = pair;
 
-        auto [staging, staging_alloc] = this->create_buffer_staging(
-            image_bytes,
-            static_cast<size_t>(width) * static_cast<size_t>(height) * 4
+        auto staging = this->create_mapped_buffer_init<uint8_t>(
+            vk::BufferUsageFlagBits::eTransferSrc,
+            std::span(image_bytes, static_cast<size_t>(width) * static_cast<size_t>(height) * 4)
         );
         stbi_image_free(image_bytes);
 
@@ -651,7 +845,7 @@ private:
         );
         
         command_buffer.copyBufferToImage(
-            staging, 
+            staging.get(), 
             image, 
             vk::ImageLayout::eTransferDstOptimal,
             {
@@ -682,7 +876,7 @@ private:
 
         this->submit_one_shot_commands_sync(command_buffer);
         
-        this->allocator.destroyBuffer(staging, staging_alloc);
+        staging.destroy(this->allocator);
 
         auto [result2, view] = device.createImageView(
             vk::ImageViewCreateInfo()
@@ -783,112 +977,110 @@ private:
             20, 21, 22,  20, 22, 23,  // +Y
         };
 
-        auto [vertex_buffer, vertex_buffer_alloc] = this->create_buffer(
-            vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst,
-            sizeof(vertices)
+        Buffer vertex_buffer = this->create_gpu_buffer<Vertex>(
+            vk::BufferUsageFlagBits::eVertexBuffer 
+                | vk::BufferUsageFlagBits::eTransferDst,
+            vertices.size()
         );
-        auto [index_buffer, index_buffer_alloc] = this->create_buffer(
-            vk::BufferUsageFlagBits::eIndexBuffer | vk::BufferUsageFlagBits::eTransferDst,
-            sizeof(indices)
+        Buffer index_buffer = this->create_gpu_buffer<uint16_t>(
+            vk::BufferUsageFlagBits::eIndexBuffer 
+                | vk::BufferUsageFlagBits::eTransferDst,
+            indices.size()
         );
-        auto [instance_buffer, instance_buffer_alloc] = this->create_buffer(
-            vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst,
-            instances.size() * sizeof(instances[0])
+        Buffer instance_buffer = this->create_gpu_buffer<Instance>(
+            vk::BufferUsageFlagBits::eVertexBuffer 
+                | vk::BufferUsageFlagBits::eTransferDst,
+            instances.size()
         );
-        uint32_t uniform_stride = this->get_uniform_stride(sizeof(Uniforms));
-        auto [uniform_buffer, uniform_info, uniform_buffer_alloc] = this->create_buffer_mapped(
-            vk::BufferUsageFlagBits::eUniformBuffer, 
-            uniform_stride * FRAMES_IN_FLIGHT
+        DynOffsetBuffer uniform_buffer = this->create_dyn_offset_buffer<Uniforms>(
+            vk::BufferUsageFlagBits::eUniformBuffer, 1
         );
-        vk::DeviceSize dir_lights_size = MAX_DIRECTIONAL_LIGHTS * sizeof(DirectionalLight);
-        uint32_t dir_lights_stride = this->get_storage_stride(dir_lights_size);
-        auto [dir_light_buffer, dir_light_info, dir_light_buffer_alloc] = 
-            this->create_buffer_mapped(
-                vk::BufferUsageFlagBits::eStorageBuffer, 
-                dir_lights_stride * FRAMES_IN_FLIGHT
-            );
-        vk::DeviceSize point_lights_size = MAX_POINT_LIGHTS * sizeof(PointLight);
-        uint32_t point_lights_stride = this->get_storage_stride(point_lights_size);
-        auto [point_light_buffer, point_light_info, point_light_buffer_alloc] = 
-            this->create_buffer_mapped(
-                vk::BufferUsageFlagBits::eStorageBuffer, 
-                point_lights_stride * FRAMES_IN_FLIGHT
-            );
+        DynOffsetBuffer dir_light_buffer = this->create_dyn_offset_buffer<DirectionalLight>(
+            vk::BufferUsageFlagBits::eStorageBuffer, 
+            MAX_DIRECTIONAL_LIGHTS
+        );
+        DynOffsetBuffer point_light_buffer = this->create_dyn_offset_buffer<PointLight>(
+            vk::BufferUsageFlagBits::eStorageBuffer, 
+            MAX_POINT_LIGHTS
+        );
 
-        auto [vertex_staging, vertex_staging_alloc] =
-            this->create_buffer_staging(vertices.data(), sizeof(vertices));
-        auto [index_staging, index_staging_alloc] =
-            this->create_buffer_staging(indices.data(), sizeof(indices));
-        auto [instance_staging, instance_staging_alloc] = this->create_buffer_staging(
-            instances.data(), instances.size() * sizeof(instances[0])
+        Buffer vertex_staging = this->create_mapped_buffer_init<Vertex>(
+            vk::BufferUsageFlagBits::eTransferSrc,
+            std::span(vertices)
+        );
+        Buffer index_staging = this->create_mapped_buffer_init<uint16_t>(
+            vk::BufferUsageFlagBits::eTransferSrc,
+            std::span(indices)
+        );
+        Buffer instance_staging = this->create_mapped_buffer_init<Instance>(
+            vk::BufferUsageFlagBits::eTransferSrc,
+            std::span(instances.data(), instances.size())
         );
 
         vk::CommandBuffer command_buffer = this->begin_one_shot_commands();
         command_buffer.copyBuffer(
-            vertex_staging,
-            vertex_buffer,
-            vk::BufferCopy().setSize(sizeof(vertices))
+            vertex_staging.get(),
+            vertex_buffer.get(),
+            vk::BufferCopy().setSize(vertex_buffer.size_bytes())
         );
         command_buffer.copyBuffer(
-            index_staging, index_buffer, vk::BufferCopy().setSize(sizeof(indices))
+            index_staging.get(),
+            index_buffer.get(), 
+            vk::BufferCopy().setSize(index_buffer.size_bytes())
         );
         command_buffer.copyBuffer(
-            instance_staging,
-            instance_buffer,
-            vk::BufferCopy().setSize(instances.size() * sizeof(instances[0]))
+            instance_staging.get(),
+            instance_buffer.get(),
+            vk::BufferCopy().setSize(instance_buffer.size_bytes())
         );
         this->submit_one_shot_commands_sync(command_buffer);
 
-        this->allocator.destroyBuffer(vertex_staging, vertex_staging_alloc);
-        this->allocator.destroyBuffer(index_staging, index_staging_alloc);
-        this->allocator.destroyBuffer(instance_staging, instance_staging_alloc);
+        vertex_staging.destroy(this->allocator);
+        index_staging.destroy(this->allocator);
+        instance_staging.destroy(this->allocator);
 
         this->vertex_buffer = vertex_buffer;
-        this->vertex_buffer_alloc = vertex_buffer_alloc;
-        this->vertex_count = vertices.size();
         this->index_buffer = index_buffer;
-        this->index_buffer_alloc = index_buffer_alloc;
-        this->index_count = indices.size();
         this->instance_buffer = instance_buffer;
-        this->instance_buffer_alloc = instance_buffer_alloc;
-        this->instance_count = instances.size();
         this->uniform_buffer = uniform_buffer;
-        this->uniform_buffer_alloc = uniform_buffer_alloc;
-        this->uniform_buffer_mapped = uniform_info.pMappedData;
-        this->uniform_stride = uniform_stride;
-        this->directional_light_buffer = dir_light_buffer;
-        this->directional_light_buffer_alloc = dir_light_buffer_alloc;
-        this->directional_light_buffer_stride = dir_lights_stride;
-        this->directional_light_buffer_mapped = dir_light_info.pMappedData;
+        this->dir_light_buffer = dir_light_buffer;
         this->point_light_buffer = point_light_buffer;
-        this->point_light_buffer_alloc = point_light_buffer_alloc;
-        this->point_light_buffer_stride = point_lights_stride;
-        this->point_light_buffer_mapped = point_light_info.pMappedData;
-    }
-
-    uint32_t get_uniform_stride(uint32_t uniform_size) {
-        vk::DeviceSize align =
-            this->physical_device.getProperties().limits.minUniformBufferOffsetAlignment;
-
-        return static_cast<uint32_t>((uniform_size + align - 1) & ~(align - 1));
-    }
-
-    uint32_t get_storage_stride(uint32_t storage_size) {
-        vk::DeviceSize align =
-            this->physical_device.getProperties().limits.minStorageBufferOffsetAlignment;
-
-        return static_cast<uint32_t>((storage_size + align - 1) & ~(align - 1));
     }
 
     void destroy_buffers() {
-        this->allocator.destroyBuffer(this->directional_light_buffer, this->directional_light_buffer_alloc);
-        this->allocator.destroyBuffer(this->point_light_buffer, this->point_light_buffer_alloc);
-        this->allocator.destroyBuffer(this->instance_buffer, this->instance_buffer_alloc);
-        this->allocator.destroyBuffer(this->vertex_buffer, this->vertex_buffer_alloc);
-        this->allocator.destroyBuffer(this->index_buffer, this->index_buffer_alloc);
-        this->allocator.destroyBuffer(this->uniform_buffer, this->uniform_buffer_alloc);
+        this->dir_light_buffer.destroy(this->allocator);
+        this->point_light_buffer.destroy(this->allocator);
+        this->instance_buffer.destroy(this->allocator);
+        this->vertex_buffer.destroy(this->allocator);
+        this->index_buffer.destroy(this->allocator);
+        this->uniform_buffer.destroy(this->allocator);
     }
 
+    template<typename T>
+    Buffer<T> create_gpu_buffer(vk::BufferUsageFlags usage, vk::DeviceSize length) {
+        return ::create_gpu_buffer<T>(this->allocator, usage, length);
+    }
+    
+    template<typename T>
+    Buffer<T> create_mapped_buffer(vk::BufferUsageFlags usage, vk::DeviceSize length) {
+        return ::create_mapped_buffer<T>(this->allocator, usage, length);
+    }
+    
+    template<typename T>
+    Buffer<T> create_mapped_buffer_init(vk::BufferUsageFlags usage, std::span<const T> data) {
+        return ::create_mapped_buffer_init<T>(this->allocator, usage, data);
+    }
+
+    template<typename T>
+    DynOffsetBuffer<T> create_dyn_offset_buffer(
+        vk::BufferUsageFlags usage, 
+        vk::DeviceSize length,
+        vk::DeviceSize count = FRAMES_IN_FLIGHT     
+    ) {
+        return ::create_dyn_offset_buffer<T>(this->allocator, usage, length, count);
+    }
+
+    /*
     std::tuple<vk::Buffer, vma::Allocation> create_buffer(
         vk::BufferUsageFlags usage, 
         vk::DeviceSize buffer_size
@@ -943,7 +1135,7 @@ private:
 
         auto [alloc, buffer] = resource;
         return {buffer, alloc_stats, alloc};
-    }
+    }*/
 
     void create_descriptor_pool() {
         std::array pool_sizes = {
@@ -1001,10 +1193,7 @@ private:
         );
         vk_expect(result2, "Failed to create descriptor set layout");
 
-        auto buffer_info = vk::DescriptorBufferInfo()
-            .setBuffer(this->uniform_buffer)
-            .setOffset(0)
-            .setRange(sizeof(Uniforms));
+        auto buffer_info = this->uniform_buffer.descriptor_info();
         auto write_uniforms = vk::WriteDescriptorSet()
             .setDstSet(descriptor_sets[0])
             .setDstBinding(0)
@@ -1012,10 +1201,7 @@ private:
             .setDescriptorType(vk::DescriptorType::eUniformBufferDynamic)
             .setBufferInfo(buffer_info);
 
-        auto dir_light_buffer_info = vk::DescriptorBufferInfo()
-            .setBuffer(this->directional_light_buffer)
-            .setOffset(0)
-            .setRange(sizeof(DirectionalLight));
+        auto dir_light_buffer_info = this->dir_light_buffer.descriptor_info();
         auto write_dir_lights = vk::WriteDescriptorSet()
             .setDstSet(descriptor_sets[0])
             .setDstBinding(1)
@@ -1023,10 +1209,7 @@ private:
             .setDescriptorType(vk::DescriptorType::eStorageBufferDynamic)
             .setBufferInfo(dir_light_buffer_info);
 
-        auto point_light_buffer_info = vk::DescriptorBufferInfo()
-            .setBuffer(this->point_light_buffer)
-            .setOffset(0)
-            .setRange(sizeof(PointLight));
+        auto point_light_buffer_info = this->point_light_buffer.descriptor_info();
         auto write_point_lights = vk::WriteDescriptorSet()
             .setDstSet(descriptor_sets[0])
             .setDstBinding(2)
@@ -1056,36 +1239,25 @@ private:
         this->descriptor_set = descriptor_sets[0];
     }
 
-    void prepare_for_drawing() {
-        this->set_mapped_uniforms({this->world_to_clip_matrix});
-    }
+    void set_mapped_uniforms() {
+        vk::Extent2D viewport_size = this->swapchain.get_extent();
+        float viewport_width = viewport_size.width;
+        float viewport_height = viewport_size.height;
 
-    void set_mapped_uniforms(const Uniforms& uniforms) {
-        auto mapped = reinterpret_cast<Uniforms*>(
-            reinterpret_cast<uint8_t*>(this->uniform_buffer_mapped) 
-                + static_cast<size_t>(this->uniform_stride) 
-                    * static_cast<size_t>(this->frame_index)
-        );
-        *mapped = uniforms;
+        this->uniform_buffer.write_one(this->frame_index, std::array{
+            Uniforms{
+                .world_to_clip = this->camera.world_to_clip(viewport_width, viewport_height),
+                .view_position = this->camera.transform.translation,
+                .ambient_light_color = this->ambient_light_color,
+                .point_lights = static_cast<uint32_t>(this->point_lights.size()),
+                .directional_lights = static_cast<uint32_t>(this->directional_lights.size()),
+            }
+        });
     }
 
     void update_lights() {
-        auto mapped_dir_lights = reinterpret_cast<uint8_t*>(this->directional_light_buffer_mapped)
-            + static_cast<size_t>(this->directional_light_buffer_stride) 
-                * static_cast<size_t>(this->frame_index);
-        auto mapped_point_lights = reinterpret_cast<uint8_t*>(this->point_light_buffer_mapped)
-            + static_cast<size_t>(this->point_light_buffer_stride) 
-                * static_cast<size_t>(this->frame_index);
-        std::memcpy(
-            mapped_dir_lights, 
-            this->directional_lights.data(), 
-            this->directional_lights.size() * sizeof(DirectionalLight)
-        );
-        std::memcpy(
-            mapped_point_lights, 
-            this->point_lights.data(), 
-            this->point_lights.size() * sizeof(PointLight)
-        );
+        this->dir_light_buffer.write_one(this->frame_index, this->directional_lights);
+        this->point_light_buffer.write_one(this->frame_index, this->point_lights);
     }
 
     void record_frame_commands(vk::CommandBuffer command_buffer, const SwapchainImage& image) {
@@ -1180,17 +1352,17 @@ private:
             this->pipeline_layout, 0,
             this->descriptor_set,
             {
-                this->uniform_stride * this->frame_index,
-                this->directional_light_buffer_stride * this->frame_index,
-                this->point_light_buffer_stride * this->frame_index
+                this->uniform_buffer.offset(this->frame_index),
+                this->dir_light_buffer.offset(this->frame_index),
+                this->point_light_buffer.offset(this->frame_index)
             }
         );
-        command_buffer.bindIndexBuffer(this->index_buffer, 0, vk::IndexType::eUint16);
-        command_buffer.bindVertexBuffers(0, this->vertex_buffer, {0});
-        command_buffer.bindVertexBuffers(1, this->instance_buffer, {0});
+        command_buffer.bindIndexBuffer(this->index_buffer.get(), 0, vk::IndexType::eUint16);
+        command_buffer.bindVertexBuffers(0, this->vertex_buffer.get(), {0});
+        command_buffer.bindVertexBuffers(1, this->instance_buffer.get(), {0});
         command_buffer.drawIndexed(
-            static_cast<uint32_t>(this->index_count), 
-            static_cast<uint32_t>(this->instance_count), 
+            static_cast<uint32_t>(this->index_buffer.length), 
+            static_cast<uint32_t>(this->instance_buffer.length), 
             0, 0, 0
         );
         command_buffer.endRendering();
@@ -1308,40 +1480,20 @@ private:
     vk::DescriptorSetLayout descriptor_set_layout;
     vk::DescriptorSet descriptor_set;
 
-    vk::Buffer uniform_buffer;
-    vma::Allocation uniform_buffer_alloc;
-    void* uniform_buffer_mapped;
-    uint32_t uniform_stride;
+    DynOffsetBuffer<Uniforms> uniform_buffer;
+    DynOffsetBuffer<DirectionalLight> dir_light_buffer;
+    DynOffsetBuffer<PointLight> point_light_buffer;
 
-    vk::Buffer directional_light_buffer;
-    vma::Allocation directional_light_buffer_alloc;
-    uint32_t directional_light_buffer_stride;
-    void *directional_light_buffer_mapped;
-
-    vk::Buffer point_light_buffer;
-    vma::Allocation point_light_buffer_alloc;
-    uint32_t point_light_buffer_stride;
-    void *point_light_buffer_mapped;
-
-    vk::Buffer instance_buffer;
-    vma::Allocation instance_buffer_alloc;
-    size_t instance_count = 0;
-
-    vk::Buffer vertex_buffer;
-    vma::Allocation vertex_buffer_alloc;
-    size_t vertex_count = 0;
-
-    vk::Buffer index_buffer;
-    vma::Allocation index_buffer_alloc;
-    size_t index_count = 0;
+    Buffer<Instance> instance_buffer;
+    Buffer<Vertex> vertex_buffer;
+    Buffer<uint16_t> index_buffer;
 
     vk::Image image;
     vk::ImageView image_view;
     vk::Sampler image_sampler;
     vma::Allocation image_alloc;
 
-    glm::mat4 world_to_clip_matrix;
-    glm::vec3 view_position = glm::vec3(0.0f);
+    Camera camera;
     glm::vec3 ambient_light_color = glm::vec3(0.5f);
     std::vector<PointLight> point_lights = {
         PointLight { 

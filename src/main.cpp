@@ -12,13 +12,111 @@
 #include "performance.h"
 #include "time.h"
 
-struct CameraController {
+struct ControllerSettings {
     float max_movement_speed = 3.0f;
     float movement_damping = 15.0f;
     float mouse_sensitivity = 0.002f;
     float scroll_sensitivity = 0.07f;
     float zoom_damping = 8.0f;
     float base_fov_radians = glm::radians(80.0f);
+
+    Key fly_forward = Key::W;
+    Key fly_back = Key::S;
+    Key fly_left = Key::A;
+    Key fly_right = Key::D;
+    Key fly_up = Key::Space;
+    Key fly_down = Key::LeftShift;
+};
+
+struct Controller {
+    ControllerSettings settings;
+
+    glm::vec3 velocity = glm::vec3(0.0f);
+    float current_log_zoom = 0.0f;
+    float target_log_zoom = 0.0f;
+    float pitch = 0.0f;
+    float yaw = 0.0f;
+
+    void update(
+        Transform& transform,
+        Projection& projection,
+        const Input& input,
+        float delta_time
+    ) {
+        this->look_around(transform, input);
+        this->fly_around(transform, input, delta_time);
+        this->zoom(input, delta_time);
+        this->update_position(transform, delta_time);
+        this->update_fov(projection);
+    }
+
+private:
+    void look_around(Transform& transform, const Input& input) {
+        glm::vec2 cursor_delta = input.cursor_delta();
+        this->yaw += cursor_delta.x * this->settings.mouse_sensitivity;
+        this->pitch -= cursor_delta.y * this->settings.mouse_sensitivity;
+        this->pitch = std::clamp(this->pitch, -1.56f, 1.56f);
+        transform.rotation = 
+            glm::angleAxis(this->yaw, glm::vec3(0.0f, 1.0f, 0.0f))
+                * glm::angleAxis(this->pitch, glm::vec3(1.0f, 0.0f, 0.0f));
+    }
+
+    void fly_around(const Transform& transform, const Input& input, float delta_time) {
+        glm::vec3 right = transform.right();
+        glm::vec3 forward = transform.forward();
+        forward.y = 0.0f;
+        glm::vec3 direction(0.0f);
+
+        if (input.key_pressed(this->settings.fly_forward)) {
+            direction += forward;
+        }
+        if (input.key_pressed(this->settings.fly_back)) {
+            direction -= forward;
+        }
+        if (input.key_pressed(this->settings.fly_left)) {
+            direction -= right;
+        }
+        if (input.key_pressed(this->settings.fly_right)) {
+            direction += right;
+        }
+
+        if (direction != glm::vec3(0.0f)) {
+            direction = glm::normalize(direction);
+        }
+
+        if (input.key_pressed(this->settings.fly_up)) {
+            direction.y -= 1.0f;
+        }
+        if (input.key_pressed(this->settings.fly_down)) {
+            direction.y += 1.0f;
+        }
+
+        glm::vec3 target_velocity = direction * this->settings.max_movement_speed;
+        float target_factor = 1.0f - std::exp(-this->settings.movement_damping * delta_time);
+
+        this->velocity = glm::mix(this->velocity, target_velocity, target_factor);
+    }
+
+    void zoom(const Input& input, float delta_time) {
+        glm::vec2 scroll_delta = input.scroll_delta();
+        if (scroll_delta.y != 0.0f) {
+            this->target_log_zoom += this->settings.scroll_sensitivity * scroll_delta.y;
+        }
+
+        float t = 1.0f - std::exp(-this->settings.zoom_damping * delta_time);
+        this->current_log_zoom = glm::mix(this->current_log_zoom, this->target_log_zoom, t);
+    }
+
+    void update_position(Transform& transform, float delta_time) {
+        transform.translation += this->velocity * delta_time;
+    }
+
+    void update_fov(Projection& projection) {
+        if (auto *p = std::get_if<PerspectiveProjection>(&projection); p != nullptr) {
+            float base_tan = std::tan(this->settings.base_fov_radians * 0.5f);
+            p->fov_radians = 2.0f * std::atan(base_tan * std::exp(-this->current_log_zoom));
+        }
+    }
 };
 
 class App {
@@ -46,7 +144,7 @@ private:
             for (auto event: this->window.poll_events()) {
                 switch (event) {
                     case WindowEvent::Resized:
-                        this->resize();
+                        this->renderer.resize();
                         break;
                     case WindowEvent::CloseRequested:
                         return;
@@ -70,18 +168,8 @@ private:
         }
     }
 
-    void resize() {
-        WindowSize size = this->window.physical_size();
-        this->renderer.resize();
-        this->camera.aspect_ratio = 
-            static_cast<float>(size.width) / static_cast<float>(size.height);
-    }
-
     void start() {
         this->window.set_cursor_locked(true);
-        this->camera.aspect_ratio = 
-            static_cast<float>(this->window.physical_size().width)
-                / static_cast<float>(this->window.physical_size().height);
     }
 
     void update(float delta_time) {
@@ -110,61 +198,12 @@ private:
             return;
         }
 
-        glm::vec2 cursor_delta = this->input.cursor_delta();
-        this->camera.yaw_radians += cursor_delta.x * this->controller.mouse_sensitivity;
-        this->camera.pitch_radians -= cursor_delta.y * this->controller.mouse_sensitivity;
-        this->camera.pitch_radians = std::clamp(this->camera.pitch_radians, -1.56f, 1.56f);
-
-        auto right = this->camera.right();
-        auto forward = this->camera.forward();
-        forward.y = 0.0f;
-        glm::vec3 direction(0.0f);
-
-        if (this->input.key_pressed(Key::W)) {
-            direction += forward;
-        }
-        if (this->input.key_pressed(Key::S)) {
-            direction -= forward;
-        }
-        if (this->input.key_pressed(Key::A)) {
-            direction -= right;
-        }
-        if (this->input.key_pressed(Key::D)) {
-            direction += right;
-        }
-
-        if (direction != glm::vec3(0.0f)) {
-            direction = glm::normalize(direction);
-        }
-
-        if (this->input.key_pressed(Key::Space)) {
-            direction.y -= 1.0f;
-        }
-        if (this->input.key_pressed(Key::LeftShift)) {
-            direction.y += 1.0f;
-        }
-
-        glm::vec3 target_velocity = direction * this->controller.max_movement_speed;
-        float target_factor = 1.0f - std::exp(-this->controller.movement_damping * delta_time);
-
-        this->camera_velocity = glm::mix(this->camera_velocity, target_velocity, target_factor);
-        this->camera.translation += this->camera_velocity * delta_time;
-
-        glm::vec2 scroll_delta = this->input.scroll_delta();
-        if (scroll_delta.y != 0.0f) {
-            this->target_log_zoom += this->controller.scroll_sensitivity * scroll_delta.y;
-        }
-        if (this->input.key_just_pressed(Key::Q)) {
-            this->target_log_zoom += this->controller.scroll_sensitivity * 2.0f;
-        }
-        if (this->input.key_just_pressed(Key::E)) {
-            this->target_log_zoom -= this->controller.scroll_sensitivity * 2.0f;
-        }
-
-        float t = 1.0f - std::exp(-this->controller.zoom_damping * delta_time);
-        this->current_log_zoom = glm::mix(this->current_log_zoom, this->target_log_zoom, t);
-        float base_tan = std::tan(this->controller.base_fov_radians * 0.5f);
-        this->camera.fov_radians = 2.0f * std::atan(base_tan * std::exp(-this->current_log_zoom));
+        this->controller.update(
+            this->camera.transform, 
+            this->camera.projection,
+            this->input,
+            delta_time
+        );
     }
 
     Window window;
@@ -172,10 +211,8 @@ private:
     Renderer renderer;
 
     Camera camera;
-    CameraController controller;
-    glm::vec3 camera_velocity = glm::vec3(0.0f);
-    float current_log_zoom = 0.0f;
-    float target_log_zoom = 0.0f;
+    Controller controller;
+    
     bool paused = false;
 };
 

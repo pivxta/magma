@@ -117,7 +117,10 @@ add_executable(
     src/swapchain.cpp
     src/swapchain.h
     src/performance.h
+    src/transform.h
     src/camera.h
+    src/image.h
+    src/image.cpp
 )
 add_shaders(${PROJECT_NAME} shaders/shader.slang)
 add_compile_definitions(VULKAN_HPP_NO_EXCEPTIONS GLFW_INCLUDE_VULKAN)
