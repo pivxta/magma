@@ -30,7 +30,7 @@ struct Swapchain::Inner {
         const SwapchainConfigureInfo& info
     ) {
         auto [result, surface_caps] = physical_device.getSurfaceCapabilitiesKHR(this->surface);
-        vk_expect(result, "Physical device surface capabilities not availible");
+        vk_expect(result, "Physical device surface capabilities not available");
 
         auto extent = this->pick_extent(surface_caps);
         auto present_mode = this->pick_present_mode(physical_device, info.present_mode);
@@ -69,7 +69,7 @@ struct Swapchain::Inner {
         this->format = surface_format.format;
 
         auto [result2, swapchain_images] = device.getSwapchainImagesKHR(this->swapchain);
-        vk_expect(result2, "Swapchain images not availible");
+        vk_expect(result2, "Swapchain images not available");
         this->images = std::move(swapchain_images);
         recreate_views(device, this->views, this->images, this->format);
         recreate_semaphores(device, this->presentable, this->images.size());
@@ -78,7 +78,7 @@ struct Swapchain::Inner {
     std::tuple<vk::Result, SwapchainImage> acquire_image(
         vk::Device device, 
         vk::Fence fence, 
-        vk::Semaphore image_availible
+        vk::Semaphore image_available
     ) {
         vk_expect(
             device.waitForFences(fence, true, std::numeric_limits<uint64_t>::max()),
@@ -86,7 +86,7 @@ struct Swapchain::Inner {
         );
 
         auto [result, index] = device.acquireNextImageKHR(
-            this->swapchain, std::numeric_limits<uint64_t>::max(), image_availible
+            this->swapchain, std::numeric_limits<uint64_t>::max(), image_available
         );
         if (result != vk::Result::eSuccess && result != vk::Result::eSuboptimalKHR) {
             return {result, SwapchainImage{}};
@@ -99,7 +99,7 @@ struct Swapchain::Inner {
                 .index = index,
                 .image = this->images[index],
                 .view = this->views[index],
-                .availible = image_availible,
+                .available = image_available,
                 .presentable = this->presentable[index]
             }
         };
@@ -186,7 +186,7 @@ private:
     }
 
     vk::Extent2D pick_extent(const vk::SurfaceCapabilitiesKHR& caps) {
-        if (caps.currentExtent == 0xffffffff) {
+        if (caps.currentExtent.width != 0xffffffff) {
             return caps.currentExtent;
         }
 
@@ -285,9 +285,9 @@ void Swapchain::configure(
 std::tuple<vk::Result, SwapchainImage> Swapchain::acquire_image(
     vk::Device device, 
     vk::Fence fence, 
-    vk::Semaphore image_availible
+    vk::Semaphore image_available
 ) {
-    return this->inner->acquire_image(device, fence, image_availible);
+    return this->inner->acquire_image(device, fence, image_available);
 }
 
 vk::Result Swapchain::present(vk::Queue queue, const SwapchainImage& image) {

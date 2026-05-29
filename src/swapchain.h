@@ -27,7 +27,7 @@ struct SwapchainImage {
     uint32_t index;
     vk::Image image;
     vk::ImageView view;
-    vk::Semaphore availible;
+    vk::Semaphore available;
     vk::Semaphore presentable;
 };
 
@@ -56,7 +56,7 @@ public:
     std::tuple<vk::Result, SwapchainImage> acquire_image(
         vk::Device device, 
         vk::Fence fence, 
-        vk::Semaphore image_availible
+        vk::Semaphore image_available
     );
 
     vk::Result present(vk::Queue queue, const SwapchainImage& image);

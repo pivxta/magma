@@ -19,8 +19,6 @@ public:
     void resize();
     void set_camera(const Camera& world_to_clip);
 
-    void upload_image(const Image& image);
-
     void draw_frame();
 
 private:

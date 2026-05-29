@@ -33,6 +33,21 @@ struct Transform {
     
     Transform() = default;
 
+    Transform& set_translation(glm::vec3 translation) {
+        this->translation = translation;
+        return *this;
+    }
+
+    Transform& set_rotation(glm::quat rotation) {
+        this->rotation = rotation;
+        return *this;
+    }
+
+    Transform& set_scale(float scale) {
+        this->scale = scale;
+        return *this;
+    }
+
     Transform& look_at(glm::vec3 target, glm::vec3 up) {
         this->rotation = glm::quatLookAtLH(glm::normalize(target - this->translation), up);
         return *this;

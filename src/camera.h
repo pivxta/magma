@@ -19,8 +19,8 @@ struct OrthographicProjection {
         auto m = glm::mat4(0.0f);
         m[0][0] = 2.0f / w;
         m[1][1] = 2.0f / h;
-        m[2][2] = 1.0f / (this->near - this->far);
-        m[3][2] = -this->far / (this->near - this->far);
+        m[2][2] = 1.0f / (this->far - this->near);
+        m[3][2] = this->far / (this->far - this->near);
         m[3][3] = 1.0f;
         return m;
     }

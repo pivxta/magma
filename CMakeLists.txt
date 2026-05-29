@@ -114,6 +114,8 @@ add_executable(
     src/renderer.cpp
     src/renderer.h
     src/target.h
+    src/buffer.h
+    src/imagetexture.h
     src/swapchain.cpp
     src/swapchain.h
     src/performance.h

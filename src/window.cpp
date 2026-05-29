@@ -176,15 +176,15 @@ struct Input::State {
 
     // NOLINTBEGIN(bugprone-easily-swappable-parameters)
     void handle_cursor(double x, double y) {
-        this->cursor_delta_x = x - this->cursor_x;
-        this->cursor_delta_y = y - this->cursor_y;
+        this->cursor_delta_x += x - this->cursor_x;
+        this->cursor_delta_y += y - this->cursor_y;
         this->cursor_x = x;    
         this->cursor_y = y;
     }
 
     void handle_scroll(double x, double y) {
-        this->scroll_delta_x = x;    
-        this->scroll_delta_y = y;
+        this->scroll_delta_x += x;    
+        this->scroll_delta_y += y;
     }
 
     void handle_key(int key_glfw, int action) {

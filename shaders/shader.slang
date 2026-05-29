@@ -9,6 +9,7 @@ struct InstanceInput {
     float3 local_to_world_y;
     float3 local_to_world_z;
     float3 translation;
+    uint32_t material_index;
 }
 
 struct VertexOutput {
@@ -16,18 +17,15 @@ struct VertexOutput {
     float3 position;
     float3 normal;
     float2 tex_coords;
+    nointerpolation uint32_t material_index;
 };
 
-struct Uniforms {
+struct ViewUniforms {
     float4x4 world_to_clip;
-    float3 view_position;
-    float3 ambient_light_color;
-    uint point_lights;
-    uint directional_lights;
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<Uniforms> uniforms;
+ConstantBuffer<ViewUniforms> view;
 
 [shader("vertex")]
 VertexOutput vertexMain(VertexInput vertex, InstanceInput instance) {
@@ -43,10 +41,11 @@ VertexOutput vertexMain(VertexInput vertex, InstanceInput instance) {
             + instance.local_to_world_z * vertex.normal.z;
     
     VertexOutput output;
-    output.sv_position = mul(uniforms.world_to_clip, float4(world_position, 1.0));
+    output.sv_position = mul(view.world_to_clip, float4(world_position, 1.0));
     output.position = world_position;
     output.normal = world_normal;
     output.tex_coords = vertex.tex_coords;
+    output.material_index = instance.material_index;
     return output;
 }
 
@@ -99,30 +98,54 @@ struct PointLight: Light {
     }
 };
 
+struct Material {
+    uint32_t albedo_index;
+    uint32_t albedo_sampler_index;
+};
+
+struct LightUniforms {
+    float3 view_position;
+    float3 ambient_color;
+    float ambient_illuminance;
+    uint point_count;
+    uint directional_count;
+};
+
 [[vk::binding(1, 0)]]
-StructuredBuffer<DirectionalLight> directional_lights;
+ConstantBuffer<LightUniforms> light;
 [[vk::binding(2, 0)]]
-StructuredBuffer<PointLight> point_lights;
+StructuredBuffer<DirectionalLight> directional_lights;
 [[vk::binding(3, 0)]]
-Sampler2D sampler;
+StructuredBuffer<PointLight> point_lights;
+
+[[vk::binding(0, 1)]]
+Texture2D[] textures;
+[[vk::binding(1, 1)]]
+SamplerState[] samplers;
+[[vk::binding(2, 1)]]
+StructuredBuffer<Material> materials;
 
 static const float PI = 3.14159265358979323846264338;
 
 [shader("fragment")]
 float4 fragmentMain(FragmentInput input) : SV_Target {
-    var albedo = sampler.Sample(input.tex_coords).rgb;
-    var color = albedo * uniforms.ambient_light_color;
-    for (uint i = 0; i < uniforms.directional_lights; i++) {
+    var material = materials[input.material_index];
+    var albedo_texture = textures[material.albedo_index];
+    var albedo_sampler = samplers[material.albedo_sampler_index];
+
+    var albedo = albedo_texture.Sample(albedo_sampler, input.tex_coords).rgb;
+    var color = albedo * light.ambient_color * light.ambient_illuminance;
+    for (uint i = 0; i < light.directional_count; i++) {
         color += directional_lights[i].illuminate(
-            uniforms.view_position,
+            light.view_position,
             input.position,
             input.normal,
             albedo,
         );
     }
-    for (uint i = 0; i < uniforms.point_lights; i++) {
+    for (uint i = 0; i < light.point_count; i++) {
         color += point_lights[i].illuminate(
-            uniforms.view_position,
+            light.view_position,
             input.position,
             input.normal,
             albedo,

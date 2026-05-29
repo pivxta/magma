@@ -6,6 +6,8 @@
 #include "target.h"
 #include "camera.h"
 #include "image.h"
+#include "imagetexture.h"
+#include "buffer.h"
 #include <vector>
 #include <optional>
 #include <iostream>
@@ -20,8 +22,16 @@
 #include <glm/gtc/quaternion.hpp>
 #include <vulkan/vulkan.hpp>
 
+static constexpr uint32_t MAX_IMAGES = 256;
+static constexpr uint32_t MAX_SAMPLERS = 128;
+static constexpr uint32_t MAX_MATERIALS = 256;
 static constexpr size_t MAX_POINT_LIGHTS = 256;
 static constexpr size_t MAX_DIRECTIONAL_LIGHTS = 128;
+
+struct AmbientLight {
+    glm::vec3 color;
+    float illuminance;
+};
 
 struct PointLight {
     alignas(16) glm::vec3 position;
@@ -72,12 +82,15 @@ struct Vertex {
 
 struct Instance {
     glm::mat4x3 local_to_world;
+    uint32_t material_index;
 
     Instance(
+        uint32_t material_index,
         glm::vec3 translation, 
         glm::quat rotation = glm::identity<glm::quat>(), 
         float scale = 1.0f
     ) {
+        this->material_index = material_index;
         this->local_to_world = glm::mat4x3(scale * glm::mat3_cast(rotation));
         this->local_to_world[3] = translation;
     }
@@ -96,15 +109,31 @@ struct Instance {
                     .setOffset(3 * sizeof(float) * static_cast<size_t>(i))
             );
         }
+        attributes.push_back(
+            vk::VertexInputAttributeDescription()
+                .setLocation(first_location + 4)
+                .setBinding(binding)
+                .setFormat(vk::Format::eR32Uint)
+                .setOffset(12 * sizeof(float))
+        );
     }
 };
 
-struct Uniforms {
+struct ViewUniforms {
     glm::mat4 world_to_clip;
+};
+
+struct LightUniforms {
     alignas(16) glm::vec3 view_position;
-    alignas(16) glm::vec3 ambient_light_color;
-    uint32_t point_lights;
-    uint32_t directional_lights;
+    alignas(16) glm::vec3 ambient_color;
+    float ambient_illuminance;
+    uint32_t point_count;
+    uint32_t directional_count;
+};
+
+struct Material {
+    uint32_t albedo_index;
+    uint32_t albedo_sampler_index;
 };
 
 static inline std::vector<uint32_t> read_spirv_file(const std::filesystem::path& path) {
@@ -126,289 +155,6 @@ static inline std::vector<uint32_t> read_spirv_file(const std::filesystem::path&
     }
 };
 
-struct UntypedBuffer {
-    vk::Buffer buffer;
-    vma::Allocation allocation;
-    vk::DeviceSize size;
-    void *mapped;
-
-    void destroy(vma::Allocator allocator) {
-        allocator.destroyBuffer(this->buffer, this->allocation);
-        this->buffer = vk::Buffer();
-        this->allocation = vma::Allocation();
-        this->size = 0;
-        this->mapped = nullptr;
-    }
-
-    operator vk::Buffer() {
-        return this->buffer;
-    }
-};
-
-static UntypedBuffer create_untyped_buffer(
-    vma::Allocator allocator,
-    const vk::BufferCreateInfo& buffer_info,
-    const vma::AllocationCreateInfo& alloc_info
-) {
-    vma::AllocationInfo info;
-    auto [result, resources] = allocator.createBuffer(buffer_info, alloc_info, &info);
-    vk_expect(result, "Failed to create buffer");
-    return {
-        .buffer = resources.second,
-        .allocation = resources.first,
-        .size = buffer_info.size,
-        .mapped = info.pMappedData
-    };
-}
-
-template<typename T>
-struct Buffer {
-    UntypedBuffer buffer;
-    vk::DeviceSize length;
-
-    operator vk::Buffer() const {
-        return this->buffer.buffer;
-    }
-
-    vk::DeviceSize size_bytes() const {
-        return this->buffer.size;
-    }
-
-    T* get_mapped() {
-        return reinterpret_cast<T*>(this->buffer.mapped);
-    }
-
-    void destroy(vma::Allocator allocator) {
-        this->buffer.destroy(allocator);
-        this->length = 0;
-    }
-    
-    vk::DescriptorBufferInfo descriptor_info(
-        vk::DeviceSize offset = 0,
-        std::optional<vk::DeviceSize> elems = std::nullopt
-    ) {
-        vk::DeviceSize length = elems.value_or(this->length);
-        return vk::DescriptorBufferInfo()
-            .setBuffer(*this)
-            .setOffset(offset)
-            .setRange(sizeof(T) * length);
-    }
-};
-
-template<typename T>
-static Buffer<T> create_gpu_buffer(
-    vma::Allocator allocator,
-    vk::BufferUsageFlags usage, 
-    vk::DeviceSize length
-) {
-    UntypedBuffer buffer = create_untyped_buffer(
-        allocator,
-        vk::BufferCreateInfo()
-            .setSharingMode(vk::SharingMode::eExclusive)
-            .setSize(length * sizeof(T))
-            .setUsage(usage),
-        vma::AllocationCreateInfo()
-            .setUsage(vma::MemoryUsage::eGpuOnly)
-    );
-    return {buffer, length};
-}
-
-template<typename T>
-static Buffer<T> create_mapped_buffer(
-    vma::Allocator allocator,
-    vk::BufferUsageFlags usage, 
-    vk::DeviceSize length
-) {
-    UntypedBuffer buffer = create_untyped_buffer(
-        allocator,
-        vk::BufferCreateInfo()
-            .setSharingMode(vk::SharingMode::eExclusive)
-            .setSize(length * sizeof(T))
-            .setUsage(usage),
-        vma::AllocationCreateInfo()
-            .setFlags(
-                vma::AllocationCreateFlagBits::eHostAccessSequentialWrite
-                    | vma::AllocationCreateFlagBits::eMapped
-            )
-            .setUsage(vma::MemoryUsage::eAuto)
-    );
-    return {buffer, length};
-}
-
-template<typename T>
-static Buffer<T> create_mapped_buffer_init(
-    vma::Allocator allocator,
-    vk::BufferUsageFlags usage, 
-    std::span<const T> data
-) {
-    Buffer buffer = create_mapped_buffer<T>(allocator, usage, data.size());
-    memcpy(buffer.get_mapped(), data.data(), data.size_bytes());
-    return buffer;
-}
-
-template<typename T>
-struct DynOffsetBuffer {
-    UntypedBuffer buffer;
-    vk::DeviceSize length;
-    vk::DeviceSize count;
-    uint32_t stride;
-
-    operator vk::Buffer() const {
-        return this->buffer.buffer;
-    }
-
-    uint32_t offset(uint32_t frame_index) const {
-        return static_cast<uint32_t>(this->stride) 
-            * static_cast<uint32_t>(frame_index);;
-    }
-
-    T* get_mapped(uint32_t frame_index) {
-        return reinterpret_cast<T*>(
-            reinterpret_cast<uint8_t*>(this->buffer.mapped) 
-                + static_cast<size_t>(this->stride) * static_cast<size_t>(frame_index)
-        );
-    }
-
-    void write_one(uint32_t frame_index, std::span<const T> data) {
-        size_t write_size = data.size_bytes();
-        if (write_size > this->stride) {
-            write_size = this->stride;
-            spdlog::warn("Write size of dynamic offset buffer higher than the stride");
-        }
-        std::memcpy(this->get_mapped(frame_index), data.data(), write_size);
-    }
-
-    void destroy(vma::Allocator allocator) {
-        this->buffer.destroy(allocator);
-        this->count = 0;
-        this->length = 0;
-    }
-
-    vk::DescriptorBufferInfo descriptor_info(
-        vk::DeviceSize offset = 0,
-        std::optional<vk::DeviceSize> elems = std::nullopt
-    ) {
-        vk::DeviceSize length = elems.value_or(this->length);
-        return vk::DescriptorBufferInfo()
-            .setBuffer(*this)
-            .setOffset(offset)
-            .setRange(sizeof(T) * length);
-    }
-};
-
-template<typename T>
-static DynOffsetBuffer<T> create_dyn_offset_buffer(
-    vma::Allocator allocator,
-    vk::BufferUsageFlags usage, 
-    vk::DeviceSize length,
-    vk::DeviceSize count
-) {
-    auto props = allocator.getPhysicalDeviceProperties();
-    vk::DeviceSize align = std::max(
-        props->limits.minStorageBufferOffsetAlignment,
-        props->limits.minUniformBufferOffsetAlignment
-    );
-    vk::DeviceSize stride = (length * sizeof(T) + align - 1) & ~(align - 1);
-    UntypedBuffer buffer = create_untyped_buffer(
-        allocator,
-        vk::BufferCreateInfo()
-            .setSharingMode(vk::SharingMode::eExclusive)
-            .setSize(stride * count)
-            .setUsage(usage),
-        vma::AllocationCreateInfo()
-            .setFlags(
-                vma::AllocationCreateFlagBits::eHostAccessSequentialWrite
-                    | vma::AllocationCreateFlagBits::eMapped
-            )
-            .setUsage(vma::MemoryUsage::eAuto)
-    );
-    return {
-        .buffer = buffer, 
-        .length = length, 
-        .count = count, 
-        .stride = static_cast<uint32_t>(stride)
-    };
-}
-
-struct ImageTexture {
-    vk::Image image;
-    vma::Allocation allocation;
-    vk::ImageView view;
-
-    uint32_t mip_levels;
-    vk::Extent3D extent;
-    vk::Format format;
-
-    operator vk::Image() const {
-        return this->image;
-    }
-
-    bool is_null() const {
-        return this->image == vk::Image();
-    }
-
-    void destroy(vk::Device device, vma::Allocator allocator) {
-        device.destroyImageView(this->view);
-        allocator.destroyImage(this->image, this->allocation);
-    }
-};
-
-static vk::ImageAspectFlags get_default_aspect_flags(vk::Format format) {
-    switch (format) {
-        case vk::Format::eD16Unorm:
-        case vk::Format::eX8D24UnormPack32:
-        case vk::Format::eD32Sfloat:
-            return vk::ImageAspectFlagBits::eDepth;
-
-        case vk::Format::eS8Uint:
-            return vk::ImageAspectFlagBits::eStencil;
-
-        case vk::Format::eD16UnormS8Uint:
-        case vk::Format::eD24UnormS8Uint:
-        case vk::Format::eD32SfloatS8Uint:
-            return vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil;
-
-        default:
-            return vk::ImageAspectFlagBits::eColor;
-    }
-}
-
-static ImageTexture create_image(
-    vk::Device device,
-    vma::Allocator allocator,
-    const vk::ImageCreateInfo& info
-) {
-    auto alloc_info = vma::AllocationCreateInfo().setUsage(vma::MemoryUsage::eGpuOnly);
-    auto [result1, resources] = allocator.createImage(info, alloc_info);
-    vk_expect(result1, "Failed to create image");
-    auto [alloc, image] = resources;
-
-    auto [result2, view] = device.createImageView(
-        vk::ImageViewCreateInfo()
-            .setImage(image)
-            .setFormat(info.format)
-            .setComponents(vk::ComponentMapping())
-            .setViewType(vk::ImageViewType::e2D)
-            .setSubresourceRange(
-                vk::ImageSubresourceRange()
-                    .setAspectMask(get_default_aspect_flags(info.format))
-                    .setBaseArrayLayer(0)
-                    .setLayerCount(1)
-                    .setBaseMipLevel(0)
-                    .setLevelCount(info.mipLevels)
-            )
-    );
-    vk_expect(result2, "Failed to create image view");
-
-    return {
-        .image = resources.second,
-        .allocation = resources.first,
-        .view = view,
-        .mip_levels = info.mipLevels,
-        .extent = info.extent,
-        .format = info.format,
-    };
-}
 
 struct Renderer::Inner {
     static constexpr uint32_t FRAMES_IN_FLIGHT = 2;
@@ -438,7 +184,7 @@ struct Renderer::Inner {
         }
         this->create_buffers();
         this->create_descriptor_pool();
-        this->create_descriptor_set();
+        this->create_descriptor_sets();
         this->create_pipeline(read_spirv_file("bin/shaders/shader.spv"));
     }
 
@@ -446,7 +192,8 @@ struct Renderer::Inner {
         vk_expect(this->device.waitIdle(), "Wait for device failed");
         this->device.destroyPipeline(this->pipeline);
         this->device.destroyPipelineLayout(this->pipeline_layout);
-        this->device.destroyDescriptorSetLayout(this->descriptor_set_layout);
+        this->device.destroyDescriptorSetLayout(this->frame_set_layout);
+        this->device.destroyDescriptorSetLayout(this->resource_set_layout);
         this->device.destroyDescriptorPool(this->descriptor_pool);
         this->device.freeCommandBuffers(this->command_pool, this->command_buffers);
         this->device.destroyCommandPool(this->command_pool);
@@ -472,7 +219,7 @@ struct Renderer::Inner {
         auto [result1, image] = this->swapchain.acquire_image(
             this->device, 
             this->fences[this->frame_index], 
-            this->image_availible[this->frame_index]
+            this->image_available[this->frame_index]
         );
 
         if (result1 == vk::Result::eErrorOutOfDateKHR) {
@@ -554,7 +301,7 @@ private:
 
     static bool device_has_swapchain_ext(vk::PhysicalDevice device) {
         auto [result, extensions] = device.enumerateDeviceExtensionProperties();
-        vk_expect(result, "Device extension properties not availible");
+        vk_expect(result, "Device extension properties not available");
 
         for (auto extension : extensions) {
             if (strcmp(extension.extensionName, vk::KHRSwapchainExtensionName) == 0) {
@@ -605,6 +352,12 @@ private:
                 vk::PhysicalDeviceVulkan13Features()
                     .setDynamicRendering(true)
                     .setSynchronization2(true),
+                
+                vk::PhysicalDeviceVulkan12Features()
+                    .setDescriptorIndexing(true)
+                    .setRuntimeDescriptorArray(true)
+                    .setDescriptorBindingPartiallyBound(true)
+                    .setDescriptorBindingSampledImageUpdateAfterBind(true),
 
                 vk::PhysicalDeviceVulkan11Features().setShaderDrawParameters(true)
             }.get()
@@ -653,11 +406,11 @@ private:
             this->fences[i] = fence;
         }
 
-        this->image_availible.resize(FRAMES_IN_FLIGHT);
+        this->image_available.resize(FRAMES_IN_FLIGHT);
         for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
             auto [result, semaphore] = this->device.createSemaphore(vk::SemaphoreCreateInfo());
-            vk_expect(result, "Failed to create image availible fence");
-            this->image_availible[i] = semaphore;
+            vk_expect(result, "Failed to create image available fence");
+            this->image_available[i] = semaphore;
         }
     }
 
@@ -665,8 +418,8 @@ private:
         for (auto fence : this->fences) {
             this->device.destroyFence(fence);
         }
-        for (auto image_availible : this->image_availible) {
-            this->device.destroySemaphore(image_availible);
+        for (auto image_available : this->image_available) {
+            this->device.destroySemaphore(image_available);
         }
     }
 
@@ -769,8 +522,12 @@ private:
         };
         auto dyn_state = vk::PipelineDynamicStateCreateInfo().setDynamicStates(dynamic_states);
 
+        std::array set_layouts = {
+            this->frame_set_layout,
+            this->resource_set_layout
+        };
         auto [result2, pipeline_layout] = this->device.createPipelineLayout(
-            vk::PipelineLayoutCreateInfo().setSetLayouts(this->descriptor_set_layout)
+            vk::PipelineLayoutCreateInfo().setSetLayouts(set_layouts)
         );
         vk_expect(result2, "Failed to create pipeline layout");
 
@@ -982,10 +739,10 @@ private:
                     )
             );
 
-            uint32_t src_width = image.extent.width >> (mip_level - 1);
-            uint32_t src_height = image.extent.height >> (mip_level - 1);
-            uint32_t dst_width = image.extent.width >> mip_level;
-            uint32_t dst_height = image.extent.height >> mip_level;
+            uint32_t src_width = std::max(image.extent.width >> (mip_level - 1), 1u);
+            uint32_t src_height = std::max(image.extent.height >> (mip_level - 1), 1u);
+            uint32_t dst_width = std::max(image.extent.width >> mip_level, 1u);
+            uint32_t dst_height = std::max(image.extent.height >> mip_level, 1u);
 
             std::array<vk::Offset3D, 2> src_offsets = {
                 vk::Offset3D(0, 0, 0), 
@@ -1070,7 +827,7 @@ private:
     }
 
     void create_buffers() {
-        const int layers = 32;
+        const int layers = 1;
         const int rows = 32;
         const int columns = 32;
         const float spacing = 2.0f;
@@ -1086,7 +843,7 @@ private:
                     float x = (frow - static_cast<float>(rows) * 0.5f + 0.5f) * spacing;
                     float z = (fcolumn - static_cast<float>(columns) * 0.5f + 0.5f) * spacing;
                     float y = flayer * spacing + 1.0f;
-                    instances.emplace_back(glm::vec3(x, y, z));
+                    instances.emplace_back(0, glm::vec3(x, y, z));
                 }
             }
         }
@@ -1148,7 +905,10 @@ private:
                 | vk::BufferUsageFlagBits::eTransferDst,
             instances.size()
         );
-        DynOffsetBuffer uniform_buffer = this->create_dyn_offset_buffer<Uniforms>(
+        DynOffsetBuffer view_uniform_buffer = this->create_dyn_offset_buffer<ViewUniforms>(
+            vk::BufferUsageFlagBits::eUniformBuffer, 1
+        );
+        DynOffsetBuffer light_uniform_buffer = this->create_dyn_offset_buffer<LightUniforms>(
             vk::BufferUsageFlagBits::eUniformBuffer, 1
         );
         DynOffsetBuffer dir_light_buffer = this->create_dyn_offset_buffer<DirectionalLight>(
@@ -1160,6 +920,15 @@ private:
             MAX_POINT_LIGHTS
         );
 
+        DynOffsetBuffer material_buffer = this->create_dyn_offset_buffer<Material>(
+            vk::BufferUsageFlagBits::eStorageBuffer, 
+            MAX_MATERIALS
+        );
+        material_buffer.write_all(Material {
+            .albedo_index = 0,
+            .albedo_sampler_index = 0
+        });
+
         Buffer vertex_staging = this->create_mapped_buffer_init<Vertex>(
             vk::BufferUsageFlagBits::eTransferSrc,
             std::span(vertices)
@@ -1170,7 +939,7 @@ private:
         );
         Buffer instance_staging = this->create_mapped_buffer_init<Instance>(
             vk::BufferUsageFlagBits::eTransferSrc,
-            std::span(instances.data(), instances.size())
+            std::span(instances)
         );
 
         vk::CommandBuffer command_buffer = this->begin_one_shot_commands();
@@ -1198,18 +967,22 @@ private:
         this->vertex_buffer = vertex_buffer;
         this->index_buffer = index_buffer;
         this->instance_buffer = instance_buffer;
-        this->uniform_buffer = uniform_buffer;
+        this->view_uniform_buffer = view_uniform_buffer;
+        this->light_uniform_buffer = light_uniform_buffer;
         this->dir_light_buffer = dir_light_buffer;
         this->point_light_buffer = point_light_buffer;
+        this->material_buffer = material_buffer;
     }
 
     void destroy_buffers() {
+        this->material_buffer.destroy(this->allocator);
         this->dir_light_buffer.destroy(this->allocator);
         this->point_light_buffer.destroy(this->allocator);
         this->instance_buffer.destroy(this->allocator);
         this->vertex_buffer.destroy(this->allocator);
         this->index_buffer.destroy(this->allocator);
-        this->uniform_buffer.destroy(this->allocator);
+        this->view_uniform_buffer.destroy(this->allocator);
+        this->light_uniform_buffer.destroy(this->allocator);
     }
 
     template<typename T>
@@ -1244,33 +1017,41 @@ private:
         std::array pool_sizes = {
             vk::DescriptorPoolSize()
                 .setType(vk::DescriptorType::eUniformBufferDynamic)
-                .setDescriptorCount(FRAMES_IN_FLIGHT),
+                .setDescriptorCount(2),
             vk::DescriptorPoolSize()
                 .setType(vk::DescriptorType::eStorageBufferDynamic)
-                .setDescriptorCount(2 * FRAMES_IN_FLIGHT),
+                .setDescriptorCount(3),
             vk::DescriptorPoolSize()
-                .setType(vk::DescriptorType::eCombinedImageSampler)
-                .setDescriptorCount(FRAMES_IN_FLIGHT),
+                .setType(vk::DescriptorType::eSampler)
+                .setDescriptorCount(MAX_SAMPLERS),
+            vk::DescriptorPoolSize()
+                .setType(vk::DescriptorType::eSampledImage)
+                .setDescriptorCount(MAX_IMAGES),
         };
         auto [result, descriptor_pool] = this->device.createDescriptorPool(
             vk::DescriptorPoolCreateInfo()
-                .setMaxSets(FRAMES_IN_FLIGHT)
+                .setMaxSets(2)
                 .setPoolSizes(pool_sizes)
         );
         vk_expect(result, "Failed to create descriptor pool");
         this->descriptor_pool = descriptor_pool;
     }
 
-    void create_descriptor_set() {
+    void create_descriptor_sets() {
+        this->create_frame_set();
+        this->create_resource_set();
+    }
+
+    void create_frame_set() {
         std::array bindings = {
             vk::DescriptorSetLayoutBinding()
                 .setBinding(0)
                 .setDescriptorType(vk::DescriptorType::eUniformBufferDynamic)
                 .setDescriptorCount(1)
-                .setStageFlags(vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment),
+                .setStageFlags(vk::ShaderStageFlagBits::eVertex),
             vk::DescriptorSetLayoutBinding()
                 .setBinding(1)
-                .setDescriptorType(vk::DescriptorType::eStorageBufferDynamic)
+                .setDescriptorType(vk::DescriptorType::eUniformBufferDynamic)
                 .setDescriptorCount(1)
                 .setStageFlags(vk::ShaderStageFlagBits::eFragment),
             vk::DescriptorSetLayoutBinding()
@@ -1280,66 +1061,138 @@ private:
                 .setStageFlags(vk::ShaderStageFlagBits::eFragment),
             vk::DescriptorSetLayoutBinding()
                 .setBinding(3)
-                .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
+                .setDescriptorType(vk::DescriptorType::eStorageBufferDynamic)
                 .setDescriptorCount(1)
                 .setStageFlags(vk::ShaderStageFlagBits::eFragment),
         };
-        auto [result1, descriptor_set_layout] = this->device.createDescriptorSetLayout(
+        auto [result1, layout] = this->device.createDescriptorSetLayout(
             vk::DescriptorSetLayoutCreateInfo().setBindings(bindings)
         );
         vk_expect(result1, "Failed to create descriptor set layout");
 
-        auto [result2, descriptor_sets] = this->device.allocateDescriptorSets(
+        auto [result2, sets] = this->device.allocateDescriptorSets(
             vk::DescriptorSetAllocateInfo()
                 .setDescriptorPool(this->descriptor_pool)
-                .setSetLayouts(descriptor_set_layout)
+                .setSetLayouts(layout)
         );
         vk_expect(result2, "Failed to create descriptor set layout");
 
-        auto buffer_info = this->uniform_buffer.descriptor_info();
-        auto write_uniforms = vk::WriteDescriptorSet()
-            .setDstSet(descriptor_sets[0])
-            .setDstBinding(0)
-            .setDstArrayElement(0)
-            .setDescriptorType(vk::DescriptorType::eUniformBufferDynamic)
-            .setBufferInfo(buffer_info);
+        std::vector<vk::WriteDescriptorSet> writes;
+        
+        auto view_uniforms_info = this->view_uniform_buffer.descriptor_info();
+        writes.push_back(
+            vk::WriteDescriptorSet()
+                .setDstSet(sets[0])
+                .setDstBinding(0)
+                .setDstArrayElement(0)
+                .setDescriptorType(vk::DescriptorType::eUniformBufferDynamic)
+                .setBufferInfo(view_uniforms_info)
+        );
 
-        auto dir_light_buffer_info = this->dir_light_buffer.descriptor_info();
-        auto write_dir_lights = vk::WriteDescriptorSet()
-            .setDstSet(descriptor_sets[0])
-            .setDstBinding(1)
-            .setDstArrayElement(0)
-            .setDescriptorType(vk::DescriptorType::eStorageBufferDynamic)
-            .setBufferInfo(dir_light_buffer_info);
+        auto light_uniforms_info = this->light_uniform_buffer.descriptor_info();
+        writes.push_back(
+            vk::WriteDescriptorSet()
+                .setDstSet(sets[0])
+                .setDstBinding(1)
+                .setDstArrayElement(0)
+                .setDescriptorType(vk::DescriptorType::eUniformBufferDynamic)
+                .setBufferInfo(light_uniforms_info)
+        );
 
-        auto point_light_buffer_info = this->point_light_buffer.descriptor_info();
-        auto write_point_lights = vk::WriteDescriptorSet()
-            .setDstSet(descriptor_sets[0])
-            .setDstBinding(2)
-            .setDstArrayElement(0)
-            .setDescriptorType(vk::DescriptorType::eStorageBufferDynamic)
-            .setBufferInfo(point_light_buffer_info);
+        auto dir_lights_info = this->dir_light_buffer.descriptor_info();
+        writes.push_back(
+            vk::WriteDescriptorSet()
+                .setDstSet(sets[0])
+                .setDstBinding(2)
+                .setDstArrayElement(0)
+                .setDescriptorType(vk::DescriptorType::eStorageBufferDynamic)
+                .setBufferInfo(dir_lights_info)
+        );
+
+        auto point_lights_info = this->point_light_buffer.descriptor_info();
+        writes.push_back(
+            vk::WriteDescriptorSet()
+                .setDstSet(sets[0])
+                .setDstBinding(3)
+                .setDstArrayElement(0)
+                .setDescriptorType(vk::DescriptorType::eStorageBufferDynamic)
+                .setBufferInfo(point_lights_info)
+        );
+        
+        this->device.updateDescriptorSets(writes, {});
+
+        this->frame_set = sets[0];
+        this->frame_set_layout = layout;
+    }
+
+    void create_resource_set() {
+        std::array bindings = {
+            vk::DescriptorSetLayoutBinding()
+                .setBinding(0)
+                .setDescriptorType(vk::DescriptorType::eSampledImage)
+                .setDescriptorCount(MAX_IMAGES)
+                .setStageFlags(vk::ShaderStageFlagBits::eFragment),
+            vk::DescriptorSetLayoutBinding()
+                .setBinding(1)
+                .setDescriptorType(vk::DescriptorType::eSampler)
+                .setDescriptorCount(MAX_SAMPLERS)
+                .setStageFlags(vk::ShaderStageFlagBits::eFragment),
+            vk::DescriptorSetLayoutBinding()
+                .setBinding(2)
+                .setDescriptorType(vk::DescriptorType::eStorageBufferDynamic)
+                .setDescriptorCount(1)
+                .setStageFlags(vk::ShaderStageFlagBits::eFragment),
+        };
+        auto [result1, layout] = this->device.createDescriptorSetLayout(
+            vk::DescriptorSetLayoutCreateInfo().setBindings(bindings)
+        );
+        vk_expect(result1, "Failed to create descriptor set layout");
+
+        auto [result2, sets] = this->device.allocateDescriptorSets(
+            vk::DescriptorSetAllocateInfo()
+                .setDescriptorPool(this->descriptor_pool)
+                .setSetLayouts(layout)
+        );
+        vk_expect(result2, "Failed to create descriptor set layout");
+
+        std::vector<vk::WriteDescriptorSet> writes;
 
         auto image_info = vk::DescriptorImageInfo()
             .setImageView(this->image.view)
-            .setSampler(this->sampler)
             .setImageLayout(vk::ImageLayout::eShaderReadOnlyOptimal);
-        auto write_image = vk::WriteDescriptorSet()
-            .setDstSet(descriptor_sets[0])
-            .setDstBinding(3)
-            .setDstArrayElement(0)
-            .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
-            .setImageInfo(image_info);
+        writes.push_back(
+            vk::WriteDescriptorSet()
+                .setDstSet(sets[0])
+                .setDstBinding(0)
+                .setDstArrayElement(0)
+                .setDescriptorType(vk::DescriptorType::eSampledImage)
+                .setImageInfo(image_info)
+        );
+        
+        auto sampler_info = vk::DescriptorImageInfo().setSampler(this->sampler);
+        writes.push_back(
+            vk::WriteDescriptorSet()
+                .setDstSet(sets[0])
+                .setDstBinding(1)
+                .setDstArrayElement(0)
+                .setDescriptorType(vk::DescriptorType::eSampler)
+                .setImageInfo(sampler_info)
+        );
 
-        this->device.updateDescriptorSets({
-            write_uniforms, 
-            write_dir_lights,
-            write_point_lights,
-            write_image,
-        }, {});
+        auto materials_info = this->material_buffer.descriptor_info();
+        writes.push_back(
+            vk::WriteDescriptorSet()
+                .setDstSet(sets[0])
+                .setDstBinding(2)
+                .setDstArrayElement(0)
+                .setDescriptorType(vk::DescriptorType::eStorageBufferDynamic)
+                .setBufferInfo(materials_info)
+        );
 
-        this->descriptor_set_layout = descriptor_set_layout;
-        this->descriptor_set = descriptor_sets[0];
+        this->device.updateDescriptorSets(writes, {});
+
+        this->resource_set = sets[0];
+        this->resource_set_layout = layout;
     }
 
     void set_mapped_uniforms() {
@@ -1347,14 +1200,15 @@ private:
         float viewport_width = viewport_size.width;
         float viewport_height = viewport_size.height;
 
-        this->uniform_buffer.write_one(this->frame_index, std::array{
-            Uniforms{
-                .world_to_clip = this->camera.world_to_clip(viewport_width, viewport_height),
-                .view_position = this->camera.transform.translation,
-                .ambient_light_color = this->ambient_light_color,
-                .point_lights = static_cast<uint32_t>(this->point_lights.size()),
-                .directional_lights = static_cast<uint32_t>(this->directional_lights.size()),
-            }
+        this->view_uniform_buffer.write_one(this->frame_index, ViewUniforms{
+            .world_to_clip = this->camera.world_to_clip(viewport_width, viewport_height),
+        });
+        this->light_uniform_buffer.write_one(this->frame_index, LightUniforms {
+            .view_position = this->camera.transform.translation,
+            .ambient_color = this->ambient_light.color,
+            .ambient_illuminance = this->ambient_light.illuminance,
+            .point_count = static_cast<uint32_t>(this->point_lights.size()),
+            .directional_count = static_cast<uint32_t>(this->directional_lights.size()),
         });
     }
 
@@ -1421,13 +1275,14 @@ private:
     }
 
     void record_draw_commands(vk::CommandBuffer command_buffer, const SwapchainImage& image) {
+        glm::vec3 ambient_color = this->ambient_light.color * this->ambient_light.illuminance; 
         auto color_attachment = vk::RenderingAttachmentInfo()
             .setImageView(image.view)
             .setImageLayout(vk::ImageLayout::eColorAttachmentOptimal)
             .setClearValue(vk::ClearColorValue(
-                this->ambient_light_color.r, 
-                this->ambient_light_color.g, 
-                this->ambient_light_color.b, 
+                ambient_color.r, 
+                ambient_color.g, 
+                ambient_color.b, 
                 1.0f
             ))
             .setLoadOp(vk::AttachmentLoadOp::eClear)
@@ -1453,11 +1308,13 @@ private:
         command_buffer.bindDescriptorSets(
             vk::PipelineBindPoint::eGraphics,
             this->pipeline_layout, 0,
-            this->descriptor_set,
+            {this->frame_set, this->resource_set},
             {
-                this->uniform_buffer.offset(this->frame_index),
+                this->view_uniform_buffer.offset(this->frame_index),
+                this->light_uniform_buffer.offset(this->frame_index),
                 this->dir_light_buffer.offset(this->frame_index),
-                this->point_light_buffer.offset(this->frame_index)
+                this->point_light_buffer.offset(this->frame_index),
+                this->material_buffer.offset(this->frame_index)
             }
         );
         command_buffer.bindIndexBuffer(this->index_buffer, 0, vk::IndexType::eUint16);
@@ -1495,7 +1352,7 @@ private:
         auto command_buffer_info = vk::CommandBufferSubmitInfo().setCommandBuffer(command_buffer);
 
         auto wait_info = vk::SemaphoreSubmitInfo()
-            .setSemaphore(image.availible)
+            .setSemaphore(image.available)
             .setStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput);
 
         auto signal_info = vk::SemaphoreSubmitInfo()
@@ -1567,7 +1424,7 @@ private:
     std::vector<ImageTexture> depth_images;
 
     std::vector<vk::Fence> fences;              // One per frame in flight
-    std::vector<vk::Semaphore> image_availible; // One per frame in flight
+    std::vector<vk::Semaphore> image_available; // One per frame in flight
 
     uint32_t frame_index = 0;
 
@@ -1578,12 +1435,16 @@ private:
     vk::PipelineLayout pipeline_layout;
 
     vk::DescriptorPool descriptor_pool;
-    vk::DescriptorSetLayout descriptor_set_layout;
-    vk::DescriptorSet descriptor_set;
+    vk::DescriptorSetLayout frame_set_layout;
+    vk::DescriptorSet frame_set;
+    vk::DescriptorSetLayout resource_set_layout;
+    vk::DescriptorSet resource_set;
 
-    DynOffsetBuffer<Uniforms> uniform_buffer;
+    DynOffsetBuffer<ViewUniforms> view_uniform_buffer;
+    DynOffsetBuffer<LightUniforms> light_uniform_buffer;
     DynOffsetBuffer<DirectionalLight> dir_light_buffer;
     DynOffsetBuffer<PointLight> point_light_buffer;
+    DynOffsetBuffer<Material> material_buffer;
 
     Buffer<Instance> instance_buffer;
     Buffer<Vertex> vertex_buffer;
@@ -1593,7 +1454,10 @@ private:
     vk::Sampler sampler;
 
     Camera camera;
-    glm::vec3 ambient_light_color = glm::vec3(0.5f);
+    AmbientLight ambient_light = {
+        .color = glm::vec3(1.0f, 1.0f, 1.0f),
+        .illuminance = 0.5f
+    };
     std::vector<PointLight> point_lights = {
         PointLight { 
             .position = glm::vec3(0.0f, -1.0f, 0.0f),
