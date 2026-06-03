@@ -38,6 +38,18 @@ struct Buffer {
     T* get_mapped() {
         return reinterpret_cast<T*>(this->buffer.mapped);
     }
+    
+    void flush(
+        vma::Allocator allocator,
+        vk::DeviceSize offset = 0,
+        std::optional<vk::DeviceSize> elems = std::nullopt
+    ) {
+        vk::DeviceSize length = elems.value_or(this->length);
+        vk_expect(allocator.flushAllocation(
+            this->buffer.allocation, 
+            offset, length * sizeof(T)
+        ), "Failed to flush buffer allocation");
+    }
 
     void destroy(vma::Allocator allocator) {
         this->buffer.destroy(allocator);
@@ -47,7 +59,7 @@ struct Buffer {
     vk::DescriptorBufferInfo descriptor_info(
         vk::DeviceSize offset = 0,
         std::optional<vk::DeviceSize> elems = std::nullopt
-    ) {
+    ) const {
         vk::DeviceSize length = elems.value_or(this->length);
         return vk::DescriptorBufferInfo()
             .setBuffer(*this)

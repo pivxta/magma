@@ -77,14 +77,8 @@ struct Swapchain::Inner {
 
     std::tuple<vk::Result, SwapchainImage> acquire_image(
         vk::Device device, 
-        vk::Fence fence, 
         vk::Semaphore image_available
     ) {
-        vk_expect(
-            device.waitForFences(fence, true, std::numeric_limits<uint64_t>::max()),
-            "Fence wait failed"
-        );
-
         auto [result, index] = device.acquireNextImageKHR(
             this->swapchain, std::numeric_limits<uint64_t>::max(), image_available
         );
@@ -92,7 +86,6 @@ struct Swapchain::Inner {
             return {result, SwapchainImage{}};
         }
 
-        vk_expect(device.resetFences(fence), "Fence reset failed");
         return {
             result,
             SwapchainImage{
@@ -284,10 +277,9 @@ void Swapchain::configure(
 
 std::tuple<vk::Result, SwapchainImage> Swapchain::acquire_image(
     vk::Device device, 
-    vk::Fence fence, 
     vk::Semaphore image_available
 ) {
-    return this->inner->acquire_image(device, fence, image_available);
+    return this->inner->acquire_image(device, image_available);
 }
 
 vk::Result Swapchain::present(vk::Queue queue, const SwapchainImage& image) {

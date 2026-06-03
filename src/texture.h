@@ -3,7 +3,7 @@
 #include <vk_mem_alloc.hpp>
 #include "vkerror.h"
 
-struct ImageTexture {
+struct Texture {
     vk::Image image;
     vma::Allocation allocation;
     vk::ImageView view;
@@ -26,7 +26,7 @@ struct ImageTexture {
     }
 };
 
-inline vk::ImageAspectFlags get_default_aspect_flags(vk::Format format) {
+static inline vk::ImageAspectFlags get_default_aspect_flags(vk::Format format) {
     switch (format) {
         case vk::Format::eD16Unorm:
         case vk::Format::eX8D24UnormPack32:
@@ -46,7 +46,7 @@ inline vk::ImageAspectFlags get_default_aspect_flags(vk::Format format) {
     }
 }
 
-inline ImageTexture create_image(
+static inline Texture create_texture(
     vk::Device device,
     vma::Allocator allocator,
     const vk::ImageCreateInfo& info

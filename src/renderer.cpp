@@ -6,8 +6,11 @@
 #include "target.h"
 #include "camera.h"
 #include "image.h"
-#include "imagetexture.h"
+#include "mesh.h"
+#include "texture.h"
 #include "buffer.h"
+#include "texturemanager.h"
+#include "materialmanager.h"
 #include <vector>
 #include <optional>
 #include <iostream>
@@ -22,7 +25,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <vulkan/vulkan.hpp>
 
-static constexpr uint32_t MAX_IMAGES = 256;
+static constexpr uint32_t MAX_TEXTURES = 256;
 static constexpr uint32_t MAX_SAMPLERS = 128;
 static constexpr uint32_t MAX_MATERIALS = 256;
 static constexpr size_t MAX_POINT_LIGHTS = 256;
@@ -49,6 +52,7 @@ struct DirectionalLight {
 struct Vertex {
     glm::vec3 position;
     glm::vec3 normal;
+    glm::vec4 tangent;
     glm::vec2 tex_coords;
 
     static void get_attributes(
@@ -74,11 +78,41 @@ struct Vertex {
             vk::VertexInputAttributeDescription()
                 .setLocation(first_location + 2)
                 .setBinding(binding)
-                .setFormat(vk::Format::eR32G32Sfloat)
+                .setFormat(vk::Format::eR32G32B32A32Sfloat)
                 .setOffset(6 * sizeof(float))
+        );
+        attributes.push_back(
+            vk::VertexInputAttributeDescription()
+                .setLocation(first_location + 3)
+                .setBinding(binding)
+                .setFormat(vk::Format::eR32G32Sfloat)
+                .setOffset(10 * sizeof(float))
         );
     }
 };
+
+static std::optional<std::vector<Vertex>> interlace_mesh_attributes(const Mesh& mesh) {
+    if (mesh.positions.size() != mesh.normals.size()
+        || mesh.positions.size() != mesh.tex_coords.size()
+        || mesh.positions.size() != mesh.tangents.size())
+    {
+        spdlog::error("Failed to load mesh, the length of the vertex attribute arrays must the same for all attributes");
+        return std::nullopt;
+    }
+
+    std::vector<Vertex> vertices;
+    vertices.reserve(mesh.positions.size());
+    for (size_t i = 0; i < mesh.positions.size(); i++) {
+        vertices.push_back({
+            .position = mesh.positions[i],
+            .normal = mesh.normals[i],
+            .tangent = mesh.tangents[i],
+            .tex_coords = mesh.tex_coords[i]
+        });
+    }
+
+    return vertices;
+}
 
 struct Instance {
     glm::mat4x3 local_to_world;
@@ -131,10 +165,11 @@ struct LightUniforms {
     uint32_t directional_count;
 };
 
+/*
 struct Material {
     uint32_t albedo_index;
     uint32_t albedo_sampler_index;
-};
+};*/
 
 static inline std::vector<uint32_t> read_spirv_file(const std::filesystem::path& path) {
     auto file_size = std::filesystem::file_size(path);
@@ -154,7 +189,6 @@ static inline std::vector<uint32_t> read_spirv_file(const std::filesystem::path&
         return {};
     }
 };
-
 
 struct Renderer::Inner {
     static constexpr uint32_t FRAMES_IN_FLIGHT = 2;
@@ -176,12 +210,21 @@ struct Renderer::Inner {
         this->configure_render_targets();
         this->create_sync_primitives();
         this->create_command_pool();
-        this->allocate_command_buffers();
-        if (auto image = Image::load("../images/rocks.jpg"); image != std::nullopt) {
-            this->upload_image(*image);
-        } else {
-            spdlog::error("Failed to load image");
-        }
+        this->texture_manager = TextureManager(
+            this->device,
+            this->queue,
+            this->allocator,
+            this->command_pool,
+            FRAMES_IN_FLIGHT,
+            MAX_TEXTURES
+        );
+        this->material_manager = MaterialManager(
+            this->device,
+            this->allocator,
+            FRAMES_IN_FLIGHT,
+            MAX_MATERIALS
+        );
+        this->allocate_command_buffers(); 
         this->create_buffers();
         this->create_descriptor_pool();
         this->create_descriptor_sets();
@@ -193,14 +236,16 @@ struct Renderer::Inner {
         this->device.destroyPipeline(this->pipeline);
         this->device.destroyPipelineLayout(this->pipeline_layout);
         this->device.destroyDescriptorSetLayout(this->frame_set_layout);
-        this->device.destroyDescriptorSetLayout(this->resource_set_layout);
+        //this->device.destroyDescriptorSetLayout(this->image_set_layout);
         this->device.destroyDescriptorPool(this->descriptor_pool);
         this->device.freeCommandBuffers(this->command_pool, this->command_buffers);
         this->device.destroyCommandPool(this->command_pool);
         this->destroy_sync_primitives();
-        this->destroy_depth_images();
+        this->destroy_depth_textures();
         this->destroy_buffers();
-        this->destroy_images();
+        this->texture_manager.destroy();
+        this->material_manager.destroy();
+        //this->destroy_images();
         this->allocator.destroy();
         this->swapchain.destroy(this->device);
         this->device.destroy();
@@ -215,12 +260,40 @@ struct Renderer::Inner {
         this->should_reconfigure_swapchain = true;
     }
 
+    TextureId add_texture(const Image& image) {
+        return this->texture_manager.add(
+            this->queue,
+            this->command_pool,
+            image
+        );
+    }
+
+    MaterialId add_material(const Material& material) {
+        MaterialId id = this->material_manager.add(material);
+        this->material = id;
+        return id;
+    }
+    
+    void add_mesh(const Mesh& mesh) {
+        this->create_mesh_buffers(mesh);
+    }
+
     void draw_frame() {
+        vk::Fence fence = this->fences[this->frame_index];
+        vk_expect(
+            device.waitForFences(
+                fence, true, 
+                std::numeric_limits<uint64_t>::max()
+            ),
+            "Fence wait failed"
+        );
+
         auto [result1, image] = this->swapchain.acquire_image(
             this->device, 
-            this->fences[this->frame_index], 
             this->image_available[this->frame_index]
         );
+
+        vk_expect(device.resetFences(fence), "Fence reset failed");
 
         if (result1 == vk::Result::eErrorOutOfDateKHR) {
             this->reconfigure_render_targets();
@@ -228,6 +301,11 @@ struct Renderer::Inner {
         } else if (result1 != vk::Result::eSuboptimalKHR) {
             vk_expect(result1, "Critical swapchain image acquisition failure");
         }
+
+        this->texture_manager.destroy_pending(this->frame_counter);
+        this->material_manager.flag_dirty_materials(this->texture_manager);
+        this->material_manager.update_dirty(this->texture_manager, this->frame_index);
+        this->texture_manager.clear_updated();
 
         this->update_lights();
         this->set_mapped_uniforms();
@@ -357,7 +435,8 @@ private:
                     .setDescriptorIndexing(true)
                     .setRuntimeDescriptorArray(true)
                     .setDescriptorBindingPartiallyBound(true)
-                    .setDescriptorBindingSampledImageUpdateAfterBind(true),
+                    .setDescriptorBindingSampledImageUpdateAfterBind(true)
+                    .setShaderSampledImageArrayNonUniformIndexing(true),
 
                 vk::PhysicalDeviceVulkan11Features().setShaderDrawParameters(true)
             }.get()
@@ -473,7 +552,7 @@ private:
 
         std::vector<vk::VertexInputAttributeDescription> attributes;
         Vertex::get_attributes(attributes, 0, 0);
-        Instance::get_attributes(attributes, 1, 3);
+        Instance::get_attributes(attributes, 1, 4);
 
         auto vertex_state = vk::PipelineVertexInputStateCreateInfo()
             .setVertexBindingDescriptions(bindings)
@@ -524,7 +603,8 @@ private:
 
         std::array set_layouts = {
             this->frame_set_layout,
-            this->resource_set_layout
+            this->texture_manager.descriptor_set_layout(),
+            this->material_manager.descriptor_set_layout(),
         };
         auto [result2, pipeline_layout] = this->device.createPipelineLayout(
             vk::PipelineLayoutCreateInfo().setSetLayouts(set_layouts)
@@ -561,11 +641,11 @@ private:
     }
 
     void create_depth_image(uint32_t frame_index) {
-        if (this->depth_images.size() != FRAMES_IN_FLIGHT) {
-            this->depth_images.resize(FRAMES_IN_FLIGHT);
+        if (this->depth_textures.size() != FRAMES_IN_FLIGHT) {
+            this->depth_textures.resize(FRAMES_IN_FLIGHT);
         }
 
-        ImageTexture image = this->create_image(
+        Texture texture = this->create_image(
             vk::ImageCreateInfo()
                 .setImageType(vk::ImageType::e2D)
                 .setExtent(vk::Extent3D(this->swapchain.get_extent(), 1))
@@ -580,250 +660,80 @@ private:
                 .setTiling(vk::ImageTiling::eOptimal)
         );
 
-        if (!this->depth_images[frame_index].is_null()) {
-            this->depth_images[frame_index].destroy(this->device, this->allocator);
+        if (!this->depth_textures[frame_index].is_null()) {
+            this->depth_textures[frame_index].destroy(this->device, this->allocator);
         }
 
-        this->depth_images[frame_index] = image;
+        this->depth_textures[frame_index] = texture;
     }
 
-    void destroy_depth_images() {
+    void destroy_depth_textures() {
         for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
-            if (!this->depth_images[i].is_null()) {
-                this->depth_images[i].destroy(this->device, this->allocator);
+            if (!this->depth_textures[i].is_null()) {
+                this->depth_textures[i].destroy(this->device, this->allocator);
             }
         }
     }
 
-    void upload_image(const Image& src) {
-        uint32_t mip_levels = static_cast<uint32_t>(std::log2(std::max(src.width, src.height))) + 1;
-        vk::Extent3D extent = vk::Extent3D(src.width, src.height, 1);
-        vk::Format format;
-        switch (src.components) {
-            case 1: format = vk::Format::eR8Srgb; break;
-            case 2: format = vk::Format::eR8G8Srgb; break;
-            case 3: format = vk::Format::eR8G8B8Srgb; break;
-            case 4: format = vk::Format::eR8G8B8A8Srgb; break;
-            default:
-                spdlog::error("Failed to upload image");
-                return;
+    void create_mesh_buffers(const Mesh& mesh) {
+        std::vector<Vertex> vertices;
+        if (auto mesh_vertices = interlace_mesh_attributes(mesh); mesh_vertices != std::nullopt) {
+            vertices = std::move(*mesh_vertices);
+        } else {
+            return;
         }
-        ImageTexture image = this->create_image(
-            vk::ImageCreateInfo()
-                .setImageType(vk::ImageType::e2D)
-                .setExtent(extent)
-                .setFormat(format)
-                .setMipLevels(mip_levels)
-                .setArrayLayers(1)
-                .setSamples(vk::SampleCountFlagBits::e1)
-                .setQueueFamilyIndices(this->queue_family_index)
-                .setUsage(vk::ImageUsageFlagBits::eTransferDst 
-                    | vk::ImageUsageFlagBits::eTransferSrc
-                    | vk::ImageUsageFlagBits::eSampled)
-                .setInitialLayout(vk::ImageLayout::eUndefined)
-                .setSharingMode(vk::SharingMode::eExclusive)
-                .setTiling(vk::ImageTiling::eOptimal)
-        );
 
-        auto staging = this->create_mapped_buffer_init<uint8_t>(
-            vk::BufferUsageFlagBits::eTransferSrc, src.bytes
-        );
-
-        vk::CommandBuffer command_buffer = this->begin_one_shot_commands();
-        this->record_buffer_to_image_copy(command_buffer, image, staging);
-        this->record_image_mip_generation(command_buffer, image);
-        this->submit_one_shot_commands_sync(command_buffer);
-        staging.destroy(this->allocator);
-
-        auto [result3, sampler] = device.createSampler(
-            vk::SamplerCreateInfo()
-                .setAddressModeU(vk::SamplerAddressMode::eRepeat)
-                .setAddressModeV(vk::SamplerAddressMode::eRepeat)
-                .setAddressModeW(vk::SamplerAddressMode::eRepeat)
-                .setAnisotropyEnable(false)
-                .setMinFilter(vk::Filter::eNearest)
-                .setMagFilter(vk::Filter::eLinear)
-                .setMipmapMode(vk::SamplerMipmapMode::eLinear)
-                .setMinLod(0.0f)
-                .setMaxLod(64.0f)
-        );
-
-        this->image = image;
-        this->sampler = sampler;
-    }
-
-    void record_buffer_to_image_copy(
-        vk::CommandBuffer command_buffer, 
-        const ImageTexture& image, 
-        const Buffer<uint8_t>& staging
-    ) {
-        this->record_image_barrier(
-            command_buffer,
-            vk::ImageMemoryBarrier2()
-                .setImage(image) 
-                .setSrcStageMask(vk::PipelineStageFlagBits2::eNone)
-                .setSrcAccessMask(vk::AccessFlagBits2::eNone)
-                .setDstStageMask(vk::PipelineStageFlagBits2::eTransfer)
-                .setDstAccessMask(vk::AccessFlagBits2::eTransferWrite)
-                .setOldLayout(vk::ImageLayout::eUndefined)
-                .setNewLayout(vk::ImageLayout::eTransferDstOptimal)
-                .setSubresourceRange(
-                    vk::ImageSubresourceRange()
-                        .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                        .setBaseMipLevel(0)
-                        .setLevelCount(1)
-                        .setBaseArrayLayer(0)
-                        .setLayerCount(1)
-                )
-        );
+        std::optional<Buffer<uint32_t>> index_buffer;
+        bool has_indices = mesh.indices != std::nullopt;
+        if (has_indices) {
+            index_buffer = this->create_gpu_buffer<uint32_t>(
+                vk::BufferUsageFlagBits::eIndexBuffer 
+                    | vk::BufferUsageFlagBits::eTransferDst,
+                mesh.indices->size()
+            );
+        }
         
-        command_buffer.copyBufferToImage(
-            staging, 
-            image, 
-            vk::ImageLayout::eTransferDstOptimal,
-            {
-                vk::BufferImageCopy()
-                    .setImageExtent(image.extent)
-                    .setImageSubresource(
-                        vk::ImageSubresourceLayers()
-                            .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                            .setBaseArrayLayer(0)
-                            .setLayerCount(1)
-                            .setMipLevel(0)
-                    )
-            }
+        Buffer vertex_buffer = this->create_gpu_buffer<Vertex>(
+            vk::BufferUsageFlagBits::eVertexBuffer 
+                | vk::BufferUsageFlagBits::eTransferDst,
+            vertices.size()
         );
-    }
 
-    void record_image_mip_generation(
-        vk::CommandBuffer command_buffer, 
-        const ImageTexture& image
-    ) {
-        for (uint32_t mip_level = 1; mip_level < image.mip_levels; mip_level++) {
-            this->record_image_barrier(
-                command_buffer,
-                vk::ImageMemoryBarrier2()
-                    .setImage(image)
-                    .setSrcStageMask(vk::PipelineStageFlagBits2::eTransfer)
-                    .setSrcAccessMask(vk::AccessFlagBits2::eTransferWrite)
-                    .setDstStageMask(vk::PipelineStageFlagBits2::eBlit)
-                    .setDstAccessMask(vk::AccessFlagBits2::eTransferRead)
-                    .setOldLayout(vk::ImageLayout::eTransferDstOptimal)
-                    .setNewLayout(vk::ImageLayout::eTransferSrcOptimal)
-                    .setSubresourceRange(
-                        vk::ImageSubresourceRange()
-                            .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                            .setBaseMipLevel(mip_level - 1)
-                            .setLevelCount(1)
-                            .setBaseArrayLayer(0)
-                            .setLayerCount(1)
-                    )
-            );
-            this->record_image_barrier(
-                command_buffer,
-                vk::ImageMemoryBarrier2()
-                    .setImage(image)
-                    .setSrcStageMask(vk::PipelineStageFlagBits2::eTransfer)
-                    .setSrcAccessMask(vk::AccessFlagBits2::eNone)
-                    .setDstStageMask(vk::PipelineStageFlagBits2::eBlit)
-                    .setDstAccessMask(vk::AccessFlagBits2::eTransferWrite)
-                    .setOldLayout(vk::ImageLayout::eUndefined)
-                    .setNewLayout(vk::ImageLayout::eTransferDstOptimal)
-                    .setSubresourceRange(
-                        vk::ImageSubresourceRange()
-                            .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                            .setBaseMipLevel(mip_level)
-                            .setLevelCount(1)
-                            .setBaseArrayLayer(0)
-                            .setLayerCount(1)
-                    )
-            );
-
-            uint32_t src_width = std::max(image.extent.width >> (mip_level - 1), 1u);
-            uint32_t src_height = std::max(image.extent.height >> (mip_level - 1), 1u);
-            uint32_t dst_width = std::max(image.extent.width >> mip_level, 1u);
-            uint32_t dst_height = std::max(image.extent.height >> mip_level, 1u);
-
-            std::array<vk::Offset3D, 2> src_offsets = {
-                vk::Offset3D(0, 0, 0), 
-                vk::Offset3D(src_width, src_height, 1)
-            };
-            auto src_subresource = vk::ImageSubresourceLayers()
-                .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                .setBaseArrayLayer(0)
-                .setLayerCount(1)
-                .setMipLevel(mip_level - 1);
-
-            std::array<vk::Offset3D, 2> dst_offsets = {
-                vk::Offset3D(0, 0, 0), 
-                vk::Offset3D(dst_width, dst_height, 1)
-            };
-            auto dst_subresource = vk::ImageSubresourceLayers()
-                .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                .setBaseArrayLayer(0)
-                .setLayerCount(1)
-                .setMipLevel(mip_level);
-            auto regions = vk::ImageBlit2()
-                .setSrcSubresource(src_subresource)
-                .setSrcOffsets(src_offsets)
-                .setDstSubresource(dst_subresource)
-                .setDstOffsets(dst_offsets);
-
-            command_buffer.blitImage2(
-                vk::BlitImageInfo2()
-                    .setSrcImage(image)   
-                    .setSrcImageLayout(vk::ImageLayout::eTransferSrcOptimal)
-                    .setDstImage(image)   
-                    .setDstImageLayout(vk::ImageLayout::eTransferDstOptimal)
-                    .setFilter(vk::Filter::eLinear)
-                    .setRegions(regions)
-            );
-
-            this->record_image_barrier(
-                command_buffer,
-                vk::ImageMemoryBarrier2()
-                    .setImage(image)
-                    .setSrcStageMask(vk::PipelineStageFlagBits2::eBlit)
-                    .setSrcAccessMask(vk::AccessFlagBits2::eTransferRead)
-                    .setDstStageMask(vk::PipelineStageFlagBits2::eFragmentShader)
-                    .setDstAccessMask(vk::AccessFlagBits2::eShaderSampledRead)
-                    .setOldLayout(vk::ImageLayout::eTransferSrcOptimal)
-                    .setNewLayout(vk::ImageLayout::eShaderReadOnlyOptimal)
-                    .setSubresourceRange(
-                        vk::ImageSubresourceRange()
-                            .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                            .setBaseMipLevel(mip_level - 1)
-                            .setLevelCount(1)
-                            .setBaseArrayLayer(0)
-                            .setLayerCount(1)
-                    )
+        Buffer vertex_staging = this->create_mapped_buffer_init<Vertex>(
+            vk::BufferUsageFlagBits::eTransferSrc,
+            std::span(vertices)
+        );
+    
+        Buffer<uint32_t> index_staging; 
+        if (has_indices) {
+            index_staging = this->create_mapped_buffer_init<uint32_t>(
+                vk::BufferUsageFlagBits::eTransferSrc,
+                std::span(*mesh.indices)
             );
         }
-
-        this->record_image_barrier(
-            command_buffer,
-            vk::ImageMemoryBarrier2()
-                .setImage(image)
-                .setSrcStageMask(vk::PipelineStageFlagBits2::eBlit)
-                .setSrcAccessMask(vk::AccessFlagBits2::eTransferWrite)
-                .setDstStageMask(vk::PipelineStageFlagBits2::eFragmentShader)
-                .setDstAccessMask(vk::AccessFlagBits2::eShaderSampledRead)
-                .setOldLayout(vk::ImageLayout::eTransferDstOptimal)
-                .setNewLayout(vk::ImageLayout::eShaderReadOnlyOptimal)
-                .setSubresourceRange(
-                    vk::ImageSubresourceRange()
-                        .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                        .setBaseMipLevel(image.mip_levels - 1)
-                        .setLevelCount(1)
-                        .setBaseArrayLayer(0)
-                        .setLayerCount(1)
-                )
+        
+        vk::CommandBuffer command_buffer = this->begin_one_shot_commands();
+        command_buffer.copyBuffer(
+            vertex_staging,
+            vertex_buffer,
+            vk::BufferCopy().setSize(vertex_buffer.size_bytes())
         );
-    }
+        if (has_indices) {
+            command_buffer.copyBuffer(
+                index_staging,
+                *index_buffer, 
+                vk::BufferCopy().setSize(index_buffer->size_bytes())
+            );
+        }
+        this->submit_one_shot_commands_sync(command_buffer);
+        
+        vertex_staging.destroy(this->allocator);
+        if (has_indices) {
+            index_staging.destroy(this->allocator);
+        }
 
-    void destroy_images() {
-        this->device.destroySampler(this->sampler);
-        this->image.destroy(this->device, this->allocator);
+        this->vertex_buffer = vertex_buffer;
+        this->index_buffer = index_buffer;
     }
 
     void create_buffers() {
@@ -843,63 +753,11 @@ private:
                     float x = (frow - static_cast<float>(rows) * 0.5f + 0.5f) * spacing;
                     float z = (fcolumn - static_cast<float>(columns) * 0.5f + 0.5f) * spacing;
                     float y = flayer * spacing + 1.0f;
-                    instances.emplace_back(0, glm::vec3(x, y, z));
+                    instances.emplace_back(1, glm::vec3(x, y, z));
                 }
             }
         }
 
-        std::array vertices = {
-            // -Z face
-            Vertex{{-0.5f, -0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 0.0f}},
-            Vertex{{-0.5f,  0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 0.0f}},
-            Vertex{{ 0.5f,  0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 1.0f}},
-            Vertex{{ 0.5f, -0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 1.0f}},
-            // +Z face
-            Vertex{{-0.5f, -0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 0.0f}},
-            Vertex{{ 0.5f, -0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 0.0f}},
-            Vertex{{ 0.5f,  0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 1.0f}},
-            Vertex{{-0.5f,  0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 1.0f}},
-            // -X face
-            Vertex{{-0.5f, -0.5f, -0.5f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 0.0f}},
-            Vertex{{-0.5f, -0.5f,  0.5f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 0.0f}},
-            Vertex{{-0.5f,  0.5f,  0.5f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 1.0f}},
-            Vertex{{-0.5f,  0.5f, -0.5f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 1.0f}},
-            // +X face
-            Vertex{{ 0.5f, -0.5f, -0.5f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 0.0f}},
-            Vertex{{ 0.5f,  0.5f, -0.5f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 0.0f}},
-            Vertex{{ 0.5f,  0.5f,  0.5f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 1.0f}},
-            Vertex{{ 0.5f, -0.5f,  0.5f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 1.0f}},
-            // -Y face (top, since +Y is down)
-            Vertex{{-0.5f, -0.5f, -0.5f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 0.0f}},
-            Vertex{{ 0.5f, -0.5f, -0.5f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 0.0f}},
-            Vertex{{ 0.5f, -0.5f,  0.5f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 1.0f}},
-            Vertex{{-0.5f, -0.5f,  0.5f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 1.0f}},
-            // +Y face (bottom)
-            Vertex{{-0.5f,  0.5f, -0.5f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 0.0f}},
-            Vertex{{-0.5f,  0.5f,  0.5f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 0.0f}},
-            Vertex{{ 0.5f,  0.5f,  0.5f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f}},
-            Vertex{{ 0.5f,  0.5f, -0.5f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 1.0f}},
-        };
-
-        std::array<uint16_t, 36> indices = {
-            0,  1,  2,   0,  2,  3,  // -Z
-            4,  5,  6,   4,  6,  7,  // +Z
-            8,  9, 10,   8, 10, 11,  // -X
-            12, 13, 14,  12, 14, 15,  // +X
-            16, 17, 18,  16, 18, 19,  // -Y
-            20, 21, 22,  20, 22, 23,  // +Y
-        };
-
-        Buffer vertex_buffer = this->create_gpu_buffer<Vertex>(
-            vk::BufferUsageFlagBits::eVertexBuffer 
-                | vk::BufferUsageFlagBits::eTransferDst,
-            vertices.size()
-        );
-        Buffer index_buffer = this->create_gpu_buffer<uint16_t>(
-            vk::BufferUsageFlagBits::eIndexBuffer 
-                | vk::BufferUsageFlagBits::eTransferDst,
-            indices.size()
-        );
         Buffer instance_buffer = this->create_gpu_buffer<Instance>(
             vk::BufferUsageFlagBits::eVertexBuffer 
                 | vk::BufferUsageFlagBits::eTransferDst,
@@ -920,23 +778,6 @@ private:
             MAX_POINT_LIGHTS
         );
 
-        DynOffsetBuffer material_buffer = this->create_dyn_offset_buffer<Material>(
-            vk::BufferUsageFlagBits::eStorageBuffer, 
-            MAX_MATERIALS
-        );
-        material_buffer.write_all(Material {
-            .albedo_index = 0,
-            .albedo_sampler_index = 0
-        });
-
-        Buffer vertex_staging = this->create_mapped_buffer_init<Vertex>(
-            vk::BufferUsageFlagBits::eTransferSrc,
-            std::span(vertices)
-        );
-        Buffer index_staging = this->create_mapped_buffer_init<uint16_t>(
-            vk::BufferUsageFlagBits::eTransferSrc,
-            std::span(indices)
-        );
         Buffer instance_staging = this->create_mapped_buffer_init<Instance>(
             vk::BufferUsageFlagBits::eTransferSrc,
             std::span(instances)
@@ -944,43 +785,29 @@ private:
 
         vk::CommandBuffer command_buffer = this->begin_one_shot_commands();
         command_buffer.copyBuffer(
-            vertex_staging,
-            vertex_buffer,
-            vk::BufferCopy().setSize(vertex_buffer.size_bytes())
-        );
-        command_buffer.copyBuffer(
-            index_staging,
-            index_buffer, 
-            vk::BufferCopy().setSize(index_buffer.size_bytes())
-        );
-        command_buffer.copyBuffer(
             instance_staging,
             instance_buffer,
             vk::BufferCopy().setSize(instance_buffer.size_bytes())
         );
         this->submit_one_shot_commands_sync(command_buffer);
 
-        vertex_staging.destroy(this->allocator);
-        index_staging.destroy(this->allocator);
         instance_staging.destroy(this->allocator);
 
-        this->vertex_buffer = vertex_buffer;
-        this->index_buffer = index_buffer;
         this->instance_buffer = instance_buffer;
         this->view_uniform_buffer = view_uniform_buffer;
         this->light_uniform_buffer = light_uniform_buffer;
         this->dir_light_buffer = dir_light_buffer;
         this->point_light_buffer = point_light_buffer;
-        this->material_buffer = material_buffer;
     }
 
     void destroy_buffers() {
-        this->material_buffer.destroy(this->allocator);
         this->dir_light_buffer.destroy(this->allocator);
         this->point_light_buffer.destroy(this->allocator);
         this->instance_buffer.destroy(this->allocator);
         this->vertex_buffer.destroy(this->allocator);
-        this->index_buffer.destroy(this->allocator);
+        if (this->index_buffer != std::nullopt) {
+            this->index_buffer->destroy(this->allocator);
+        }
         this->view_uniform_buffer.destroy(this->allocator);
         this->light_uniform_buffer.destroy(this->allocator);
     }
@@ -1000,8 +827,8 @@ private:
         return ::create_mapped_buffer_init<T>(this->allocator, usage, data);
     }
 
-    ImageTexture create_image(const vk::ImageCreateInfo& info) {
-        return ::create_image(this->device, this->allocator, info);
+    Texture create_image(const vk::ImageCreateInfo& info) {
+        return ::create_texture(this->device, this->allocator, info);
     }
 
     template<typename T>
@@ -1026,11 +853,11 @@ private:
                 .setDescriptorCount(MAX_SAMPLERS),
             vk::DescriptorPoolSize()
                 .setType(vk::DescriptorType::eSampledImage)
-                .setDescriptorCount(MAX_IMAGES),
+                .setDescriptorCount(MAX_TEXTURES),
         };
         auto [result, descriptor_pool] = this->device.createDescriptorPool(
             vk::DescriptorPoolCreateInfo()
-                .setMaxSets(2)
+                .setMaxSets(3)
                 .setPoolSizes(pool_sizes)
         );
         vk_expect(result, "Failed to create descriptor pool");
@@ -1039,7 +866,8 @@ private:
 
     void create_descriptor_sets() {
         this->create_frame_set();
-        this->create_resource_set();
+        //this->create_image_set();
+        //this->create_material_set();
     }
 
     void create_frame_set() {
@@ -1125,76 +953,6 @@ private:
         this->frame_set_layout = layout;
     }
 
-    void create_resource_set() {
-        std::array bindings = {
-            vk::DescriptorSetLayoutBinding()
-                .setBinding(0)
-                .setDescriptorType(vk::DescriptorType::eSampledImage)
-                .setDescriptorCount(MAX_IMAGES)
-                .setStageFlags(vk::ShaderStageFlagBits::eFragment),
-            vk::DescriptorSetLayoutBinding()
-                .setBinding(1)
-                .setDescriptorType(vk::DescriptorType::eSampler)
-                .setDescriptorCount(MAX_SAMPLERS)
-                .setStageFlags(vk::ShaderStageFlagBits::eFragment),
-            vk::DescriptorSetLayoutBinding()
-                .setBinding(2)
-                .setDescriptorType(vk::DescriptorType::eStorageBufferDynamic)
-                .setDescriptorCount(1)
-                .setStageFlags(vk::ShaderStageFlagBits::eFragment),
-        };
-        auto [result1, layout] = this->device.createDescriptorSetLayout(
-            vk::DescriptorSetLayoutCreateInfo().setBindings(bindings)
-        );
-        vk_expect(result1, "Failed to create descriptor set layout");
-
-        auto [result2, sets] = this->device.allocateDescriptorSets(
-            vk::DescriptorSetAllocateInfo()
-                .setDescriptorPool(this->descriptor_pool)
-                .setSetLayouts(layout)
-        );
-        vk_expect(result2, "Failed to create descriptor set layout");
-
-        std::vector<vk::WriteDescriptorSet> writes;
-
-        auto image_info = vk::DescriptorImageInfo()
-            .setImageView(this->image.view)
-            .setImageLayout(vk::ImageLayout::eShaderReadOnlyOptimal);
-        writes.push_back(
-            vk::WriteDescriptorSet()
-                .setDstSet(sets[0])
-                .setDstBinding(0)
-                .setDstArrayElement(0)
-                .setDescriptorType(vk::DescriptorType::eSampledImage)
-                .setImageInfo(image_info)
-        );
-        
-        auto sampler_info = vk::DescriptorImageInfo().setSampler(this->sampler);
-        writes.push_back(
-            vk::WriteDescriptorSet()
-                .setDstSet(sets[0])
-                .setDstBinding(1)
-                .setDstArrayElement(0)
-                .setDescriptorType(vk::DescriptorType::eSampler)
-                .setImageInfo(sampler_info)
-        );
-
-        auto materials_info = this->material_buffer.descriptor_info();
-        writes.push_back(
-            vk::WriteDescriptorSet()
-                .setDstSet(sets[0])
-                .setDstBinding(2)
-                .setDstArrayElement(0)
-                .setDescriptorType(vk::DescriptorType::eStorageBufferDynamic)
-                .setBufferInfo(materials_info)
-        );
-
-        this->device.updateDescriptorSets(writes, {});
-
-        this->resource_set = sets[0];
-        this->resource_set_layout = layout;
-    }
-
     void set_mapped_uniforms() {
         vk::Extent2D viewport_size = this->swapchain.get_extent();
         float viewport_width = viewport_size.width;
@@ -1228,7 +986,7 @@ private:
         this->record_image_barrier(
             command_buffer,
             vk::ImageMemoryBarrier2()
-                .setImage(this->depth_images[this->frame_index])
+                .setImage(this->depth_textures[this->frame_index])
                 .setSrcStageMask(vk::PipelineStageFlagBits2::eNone)
                 .setSrcAccessMask(vk::AccessFlagBits2::eNone)
                 .setDstStageMask(vk::PipelineStageFlagBits2::eEarlyFragmentTests)
@@ -1289,7 +1047,7 @@ private:
             .setStoreOp(vk::AttachmentStoreOp::eStore);
 
         auto depth_attachment = vk::RenderingAttachmentInfo()
-            .setImageView(this->depth_images[this->frame_index].view)
+            .setImageView(this->depth_textures[this->frame_index].view)
             .setImageLayout(vk::ImageLayout::eDepthAttachmentOptimal)
             .setClearValue(vk::ClearDepthStencilValue(0.0f))
             .setLoadOp(vk::AttachmentLoadOp::eClear)
@@ -1308,23 +1066,30 @@ private:
         command_buffer.bindDescriptorSets(
             vk::PipelineBindPoint::eGraphics,
             this->pipeline_layout, 0,
-            {this->frame_set, this->resource_set},
+            {
+                this->frame_set, 
+                this->texture_manager.descriptor_set(), 
+                this->material_manager.descriptor_set(this->frame_index)
+            },
             {
                 this->view_uniform_buffer.offset(this->frame_index),
                 this->light_uniform_buffer.offset(this->frame_index),
                 this->dir_light_buffer.offset(this->frame_index),
                 this->point_light_buffer.offset(this->frame_index),
-                this->material_buffer.offset(this->frame_index)
             }
         );
-        command_buffer.bindIndexBuffer(this->index_buffer, 0, vk::IndexType::eUint16);
+        if (this->index_buffer != std::nullopt) {
+            command_buffer.bindIndexBuffer(*this->index_buffer, 0, vk::IndexType::eUint32);
+        }
         command_buffer.bindVertexBuffers(0, (vk::Buffer)this->vertex_buffer, {0});
         command_buffer.bindVertexBuffers(1, (vk::Buffer)this->instance_buffer, {0});
-        command_buffer.drawIndexed(
-            static_cast<uint32_t>(this->index_buffer.length), 
-            static_cast<uint32_t>(this->instance_buffer.length), 
-            0, 0, 0
-        );
+        if (this->index_buffer != std::nullopt) {
+            command_buffer.drawIndexed(
+                static_cast<uint32_t>(this->index_buffer->length), 
+                static_cast<uint32_t>(this->instance_buffer.length), 
+                0, 0, 0
+            );
+        }
         command_buffer.endRendering();
     }
 
@@ -1421,12 +1186,13 @@ private:
     SwapchainConfigureInfo swapchain_info;
     bool should_reconfigure_swapchain = false;
 
-    std::vector<ImageTexture> depth_images;
+    std::vector<Texture> depth_textures;
 
     std::vector<vk::Fence> fences;              // One per frame in flight
     std::vector<vk::Semaphore> image_available; // One per frame in flight
 
     uint32_t frame_index = 0;
+    uint64_t frame_counter = 0;
 
     vk::CommandPool command_pool;
     std::vector<vk::CommandBuffer> command_buffers; // One per frame in flight
@@ -1437,21 +1203,19 @@ private:
     vk::DescriptorPool descriptor_pool;
     vk::DescriptorSetLayout frame_set_layout;
     vk::DescriptorSet frame_set;
-    vk::DescriptorSetLayout resource_set_layout;
-    vk::DescriptorSet resource_set;
 
     DynOffsetBuffer<ViewUniforms> view_uniform_buffer;
     DynOffsetBuffer<LightUniforms> light_uniform_buffer;
     DynOffsetBuffer<DirectionalLight> dir_light_buffer;
     DynOffsetBuffer<PointLight> point_light_buffer;
-    DynOffsetBuffer<Material> material_buffer;
 
     Buffer<Instance> instance_buffer;
     Buffer<Vertex> vertex_buffer;
-    Buffer<uint16_t> index_buffer;
+    std::optional<Buffer<uint32_t>> index_buffer;
 
-    ImageTexture image;
-    vk::Sampler sampler;
+    TextureManager texture_manager;
+    MaterialManager material_manager;
+    MaterialId material;
 
     Camera camera;
     AmbientLight ambient_light = {
@@ -1470,7 +1234,7 @@ private:
         DirectionalLight { 
             .direction = glm::vec3(0.3f, 1.5f, 0.6f),
             .color = glm::vec3(1.0f, 1.0f, 1.0f),
-            .illuminance = 1.0f
+            .illuminance = 2.0f
         }
     };
 };
@@ -1496,6 +1260,18 @@ Renderer& Renderer::operator=(Renderer&& other) noexcept {
 
 void Renderer::resize() {
     this->inner->resize();
+}
+
+MaterialId Renderer::add_material(const Material& material) {
+    return this->inner->add_material(material);
+}
+
+TextureId Renderer::add_texture(const Image& image) {
+    return this->inner->add_texture(image);
+}
+
+void Renderer::add_mesh(const Mesh& mesh) {
+    return this->inner->add_mesh(mesh);
 }
 
 void Renderer::set_camera(const Camera& camera) {

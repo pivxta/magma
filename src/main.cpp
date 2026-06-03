@@ -5,12 +5,14 @@
 #include <fstream>
 #include <algorithm>
 #include <chrono>
+#include "material.h"
 #include "camera.h"
 #include "window.h"
 #include "input.h"
 #include "renderer.h"
 #include "performance.h"
 #include "time.h"
+#include "mesh.h"
 #include "image.h"
 
 struct ControllerSettings {
@@ -120,6 +122,73 @@ private:
     }
 };
 
+Mesh generate_uv_sphere(uint32_t stacks, uint32_t slices, float radius = 1.0f) {
+    std::vector<glm::vec3> positions;
+    std::vector<glm::vec3> normals;
+    std::vector<glm::vec4> tangents;
+    std::vector<glm::vec2> tex_coords;
+    std::vector<uint32_t> indices;
+
+    for (uint32_t stack = 0; stack <= stacks; stack++) {
+        float phi = glm::pi<float>() * static_cast<float>(stack) / static_cast<float>(stacks);
+        float cos_phi = std::cos(phi);
+        float sin_phi = std::sin(phi);
+
+        for (uint32_t slice = 0; slice <= slices; slice++) {
+            float theta = 2.0f * glm::pi<float>() * static_cast<float>(slice) / static_cast<float>(slices);
+            float cos_theta = std::cos(theta);
+            float sin_theta = std::sin(theta);
+
+            glm::vec3 normal = {
+                sin_phi * cos_theta,
+                cos_phi,
+                sin_phi * sin_theta,
+            };
+            glm::vec3 position = normal * radius;
+            glm::vec2 uv = {
+                static_cast<float>(slice) / static_cast<float>(slices),
+                static_cast<float>(stack) / static_cast<float>(stacks),
+            };
+            // Tangent along the theta direction
+            glm::vec4 tangent = {
+                -sin_theta,
+                0.0f,
+                cos_theta,
+                1.0f  // bitangent sign
+            };
+
+            positions.push_back(position);
+            normals.push_back(normal);
+            tex_coords.push_back(uv);
+            tangents.push_back(tangent);
+        }
+    }
+
+    for (uint32_t stack = 0; stack < stacks; stack++) {
+        for (uint32_t slice = 0; slice < slices; slice++) {
+            uint32_t a = stack * (slices + 1) + slice;
+            uint32_t b = a + 1;
+            uint32_t c = a + (slices + 1);
+            uint32_t d = c + 1;
+
+            indices.push_back(a);
+            indices.push_back(b);
+            indices.push_back(c);
+
+            indices.push_back(c);
+            indices.push_back(b);
+            indices.push_back(d);
+        }
+    }
+
+    return Mesh()
+        .set_positions(std::move(positions))
+        .set_normals(std::move(normals))
+        .set_tangents(std::move(tangents))
+        .set_tex_coords(std::move(tex_coords))
+        .set_indices(std::move(indices));
+}
+
 class App {
 public:
     App() = default;
@@ -171,6 +240,25 @@ private:
 
     void start() {
         this->window.set_cursor_locked(true);
+        TextureId base_color;
+        TextureId normal_map;
+        if (auto image = Image::load("../images/rocks.jpg"); image != std::nullopt) {
+            base_color = this->renderer.add_texture(image->set_sampler(Sampler::LinearRepeat));
+        }
+        if (auto image = Image::load("../images/rocksnormal.jpg"); image != std::nullopt) {
+            normal_map = this->renderer.add_texture(
+                image->set_sampler(Sampler::LinearRepeat)
+                    .set_format(ImageFormat::Rgba8)
+            );
+        }
+        MaterialId material = this->renderer.add_material(
+            Material()
+                .set_base_color_texture(base_color)
+                .set_normal_map(normal_map)
+                .set_roughness_factor(0.6f)
+        );
+        (void)material;
+        this->renderer.add_mesh(generate_uv_sphere(16, 16, 0.5f));
     }
 
     void update(float delta_time) {
@@ -215,6 +303,8 @@ private:
     Controller controller;
     
     bool paused = false;
+
+    TextureId texture;
 };
 
 int main() {

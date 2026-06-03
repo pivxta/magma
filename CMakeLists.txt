@@ -115,14 +115,25 @@ add_executable(
     src/renderer.h
     src/target.h
     src/buffer.h
-    src/imagetexture.h
+    src/texture.h
     src/swapchain.cpp
     src/swapchain.h
     src/performance.h
     src/transform.h
     src/camera.h
+    src/mesh.h
     src/image.h
     src/image.cpp
+    src/slotmap.h
+    src/material.h
+    src/resource.h
+    src/texturemanager.h
+    src/texturemanager.cpp
+    src/textureindices.h
+    src/materialmanager.h
+    src/materialmanager.cpp
+    src/meshmanager.h
+    src/meshmanager.cpp
 )
 add_shaders(${PROJECT_NAME} shaders/shader.slang)
 add_compile_definitions(VULKAN_HPP_NO_EXCEPTIONS GLFW_INCLUDE_VULKAN)

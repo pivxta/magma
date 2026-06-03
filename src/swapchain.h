@@ -55,7 +55,6 @@ public:
 
     std::tuple<vk::Result, SwapchainImage> acquire_image(
         vk::Device device, 
-        vk::Fence fence, 
         vk::Semaphore image_available
     );
 

@@ -2,10 +2,13 @@
 #include <memory>
 #include <cstdint>
 #include <glm/mat4x4.hpp>
+#include "resource.h"
 
 class Target;
 struct Camera;
+struct Material;
 struct Image;
+struct Mesh;
 
 class Renderer {
 public:
@@ -18,6 +21,10 @@ public:
 
     void resize();
     void set_camera(const Camera& world_to_clip);
+
+    TextureId add_texture(const Image& image);
+    MaterialId add_material(const Material& material);
+    void add_mesh(const Mesh& mesh);
 
     void draw_frame();
 
