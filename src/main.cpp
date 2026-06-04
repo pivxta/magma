@@ -207,6 +207,7 @@ private:
 
         PerformanceCounter perf_counter;
         Instant last_frame = Instant::now();
+        Instant loop_start = Instant::now();
         while (true) {
             auto delta_time = last_frame.elapsed_seconds<float>();
             last_frame = Instant::now();
@@ -219,6 +220,10 @@ private:
                     case WindowEvent::CloseRequested:
                         return;
                 }
+            }
+
+            if (loop_start.elapsed_seconds<float>() > 6.0f) {
+                this->renderer.free_texture(this->base_color);
             }
 
             this->update(delta_time);
@@ -240,10 +245,17 @@ private:
 
     void start() {
         this->window.set_cursor_locked(true);
-        TextureId base_color;
+        //TextureId base_color;
         TextureId normal_map;
+        TextureId aorm_map;
         if (auto image = Image::load("../images/rocks.jpg"); image != std::nullopt) {
-            base_color = this->renderer.add_texture(image->set_sampler(Sampler::LinearRepeat));
+            this->base_color = this->renderer.add_texture(image->set_sampler(Sampler::LinearRepeat));
+        }
+        if (auto image = Image::load("../images/rocksaorm.png"); image != std::nullopt) {
+            aorm_map = this->renderer.add_texture(
+                image->set_sampler(Sampler::LinearRepeat)
+                    .set_format(ImageFormat::Rgba8)
+            );
         }
         if (auto image = Image::load("../images/rocksnormal.jpg"); image != std::nullopt) {
             normal_map = this->renderer.add_texture(
@@ -251,13 +263,14 @@ private:
                     .set_format(ImageFormat::Rgba8)
             );
         }
+        
         MaterialId material = this->renderer.add_material(
             Material()
-                .set_base_color_texture(base_color)
+                .set_base_color_texture(this->base_color)
                 .set_normal_map(normal_map)
-                .set_roughness_factor(0.6f)
+                .set_ao_roughness_metallic_map(aorm_map)
         );
-        (void)material;
+        this->renderer.use_material(material);
         this->renderer.add_mesh(generate_uv_sphere(16, 16, 0.5f));
     }
 
@@ -304,7 +317,7 @@ private:
     
     bool paused = false;
 
-    TextureId texture;
+    TextureId base_color;
 };
 
 int main() {

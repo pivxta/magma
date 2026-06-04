@@ -22,8 +22,15 @@ public:
     void resize();
     void set_camera(const Camera& world_to_clip);
 
-    TextureId add_texture(const Image& image);
+    TextureId add_texture(const Image& image); 
+    void set_texture(TextureId id, const Image& image); 
+    void free_texture(TextureId id); 
+
     MaterialId add_material(const Material& material);
+    void set_material(MaterialId id, const Material& material);
+    void free_material(MaterialId id);
+    void use_material(MaterialId id);
+
     void add_mesh(const Mesh& mesh);
 
     void draw_frame();

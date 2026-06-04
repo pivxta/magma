@@ -1,4 +1,5 @@
 #define STB_IMAGE_IMPLEMENTATION
+#include <spdlog/spdlog.h>
 #include <stb_image.h>
 #include "image.h"
 
@@ -31,6 +32,7 @@ std::optional<Image> Image::load(const char* filename, const ImageLoadInfo& info
     if (components == 3) {
         components = 4; // Most GPUs dont support Rgb8 format, so we use Rgba8.
     }
+    spdlog::info("{}: {} channels", filename, components);
 
     uint8_t* loaded_bytes = stbi_load(filename, &width, &height, nullptr, components);
     if (loaded_bytes == nullptr) {

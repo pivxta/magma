@@ -165,12 +165,6 @@ struct LightUniforms {
     uint32_t directional_count;
 };
 
-/*
-struct Material {
-    uint32_t albedo_index;
-    uint32_t albedo_sampler_index;
-};*/
-
 static inline std::vector<uint32_t> read_spirv_file(const std::filesystem::path& path) {
     auto file_size = std::filesystem::file_size(path);
     if (file_size == 0) {
@@ -268,10 +262,34 @@ struct Renderer::Inner {
         );
     }
 
+    void set_texture(TextureId id, const Image& image) {
+        this->texture_manager.set(
+            id,
+            this->queue,
+            this->command_pool,
+            this->frame_counter,
+            image
+        );
+    }
+
+    void free_texture(TextureId id) {
+        this->texture_manager.request_free(id, this->frame_counter);
+    }
+
     MaterialId add_material(const Material& material) {
-        MaterialId id = this->material_manager.add(material);
+        return this->material_manager.add(material);
+    }
+
+    void set_material(MaterialId id, const Material& material) {
+        this->material_manager.set(id, material);
+    }
+
+    void free_material(MaterialId id) {
+        this->material_manager.free(id);
+    }
+
+    void use_material(MaterialId id) {
         this->material = id;
-        return id;
     }
     
     void add_mesh(const Mesh& mesh) {
@@ -322,7 +340,8 @@ struct Renderer::Inner {
             this->reconfigure_render_targets();
         }
 
-        this->frame_index = (this->frame_index + 1) % FRAMES_IN_FLIGHT;
+        this->frame_counter += 1;
+        this->frame_index = this->frame_counter % FRAMES_IN_FLIGHT;
     }
 
 private:
@@ -1227,7 +1246,7 @@ private:
             .position = glm::vec3(0.0f, -1.0f, 0.0f),
             .radius = 100.0f,
             .color = glm::vec3(1.0f, 1.0f, 1.0f),
-            .intensity = 200.0f
+            .intensity = 600.0f
         }
     };
     std::vector<DirectionalLight> directional_lights = {
@@ -1266,8 +1285,28 @@ MaterialId Renderer::add_material(const Material& material) {
     return this->inner->add_material(material);
 }
 
+void Renderer::set_material(MaterialId id, const Material& material) {
+    return this->inner->set_material(id, material);
+}
+
+void Renderer::free_material(MaterialId id) {
+    return this->inner->free_material(id);
+}
+
+void Renderer::use_material(MaterialId id) {
+    return this->inner->use_material(id);
+}
+
 TextureId Renderer::add_texture(const Image& image) {
     return this->inner->add_texture(image);
+}
+
+void Renderer::set_texture(TextureId id, const Image& image) {
+    return this->inner->set_texture(id, image);
+}
+
+void Renderer::free_texture(TextureId id) {
+    return this->inner->free_texture(id);
 }
 
 void Renderer::add_mesh(const Mesh& mesh) {

@@ -1,5 +1,6 @@
 #include "materialmanager.h"
 #include "texturemanager.h"
+#include <spdlog/spdlog.h>
 
 struct MaterialData {
     TextureIndices base_color;
@@ -30,13 +31,14 @@ static MaterialData get_material_data(const Material& material, const TextureMan
     TextureIndices base_color_indices = material.base_color_texture.has_value() ?
         textures.get(*material.base_color_texture, TextureFallback::ColorError) :
         textures.get_fallback(TextureFallback::ColorWhite);
+    spdlog::info("Base color sampler index: {}", base_color_indices.sampler);
 
     TextureIndices normal_map_indices = material.normal_map.has_value() ?
         textures.get(*material.normal_map, TextureFallback::Normal) :
         textures.get_fallback(TextureFallback::Normal);
 
     TextureIndices aorm_map_indices = material.ao_roughness_metallic_map.has_value() ?
-        textures.get(*material.normal_map, TextureFallback::AoRoughnessMetallic) :
+        textures.get(*material.ao_roughness_metallic_map, TextureFallback::AoRoughnessMetallic) :
         textures.get_fallback(TextureFallback::AoRoughnessMetallic);
 
     return {

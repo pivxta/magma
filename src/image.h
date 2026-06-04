@@ -41,7 +41,7 @@ struct Image {
     ImageFormat format;
     std::vector<uint8_t> bytes;
 
-    Sampler sampler;
+    Sampler sampler = Sampler::LinearRepeat;
 
     static std::optional<Image> load(
         const char *filename, 

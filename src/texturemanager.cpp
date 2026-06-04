@@ -2,6 +2,7 @@
 #include "buffer.h"
 #include "vkerror.h"
 #include <cassert>
+#include <spdlog/spdlog.h>
 
 static constexpr uint32_t FALLBACK_COUNT = static_cast<uint32_t>(TextureFallback::Count);
 static constexpr uint32_t SAMPLER_COUNT = static_cast<uint32_t>(Sampler::Count);
@@ -120,7 +121,7 @@ TextureId TextureManager::get_texture_id(SlotKey<Slot> key) {
 TextureIndices TextureManager::get_slot_indices(const Slot& slot) {
     return {
         .texture = slot.texture.value_or(slot.fallback).index,
-        .sampler = slot.sampler_index   
+        .sampler = slot.sampler_index
     };
 }
 
@@ -161,6 +162,7 @@ TextureIndices TextureManager::get(TextureId id, TextureFallback fallback) const
     if (auto slot = this->slots.get(get_slot_key(id)); slot != nullptr) {
         return get_slot_indices(*slot);
     }
+    spdlog::info("Sampler index: {}", this->get_fallback_indices(fallback).sampler);
     return this->get_fallback_indices(fallback);
 }
 
@@ -556,12 +558,12 @@ static vk::Filter get_filter(Sampler sampler) {
         case Sampler::NearestClamp: return vk::Filter::eNearest;
         default: return vk::Filter::eNearest;
     }
-    return vk::Filter::eLinear;
 }
 
 static vk::Sampler create_sampler(vk::Device device, Sampler type) {
     vk::SamplerAddressMode address_mode = get_address_mode(type);
     vk::Filter filter = get_filter(type);
+    spdlog::info("Sampler type: {}, Filter type: {}", static_cast<int>(type), static_cast<int>(filter));
     auto info = vk::SamplerCreateInfo()
         .setMagFilter(filter)
         .setAddressModeU(address_mode)
