@@ -97,11 +97,11 @@ struct Transform {
     }
 
     Transform operator*(const Transform& child) const {
-        return Transform(
+        return {
             this->translation + (this->rotation * (child.translation * this->scale)),
             this->rotation * child.rotation,
             this->scale * child.scale
-        );
+        };
     }
 
     Transform& operator*=(const Transform& child) {

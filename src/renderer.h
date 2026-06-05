@@ -1,7 +1,5 @@
 #pragma once
 #include <memory>
-#include <cstdint>
-#include <glm/mat4x4.hpp>
 #include "resource.h"
 
 class Target;
@@ -27,6 +25,7 @@ public:
     void free_texture(TextureId id); 
 
     MaterialId add_material(const Material& material);
+    const Material* get_material(MaterialId id);
     void set_material(MaterialId id, const Material& material);
     void free_material(MaterialId id);
     void use_material(MaterialId id);

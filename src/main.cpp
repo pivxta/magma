@@ -1,10 +1,6 @@
 #include <spdlog/spdlog.h>
-#include <cstdlib>
-#include <filesystem>
 #include <cmath>
-#include <fstream>
 #include <algorithm>
-#include <chrono>
 #include "material.h"
 #include "camera.h"
 #include "window.h"
@@ -189,6 +185,34 @@ Mesh generate_uv_sphere(uint32_t stacks, uint32_t slices, float radius = 1.0f) {
         .set_indices(std::move(indices));
 }
 
+Mesh generate_plane(float size = 1.0f, float uv_scale = 1.0f) {
+    const float h = size * 0.5f;
+    const float t = uv_scale;
+
+    std::vector<glm::vec3> positions = {
+        {-h, 0.0f, -h},
+        { h, 0.0f, -h},
+        {-h, 0.0f,  h},
+        { h, 0.0f,  h},
+    };
+    std::vector<glm::vec2> tex_coords = {
+        {0.0f, 0.0f},
+        {t, 0.0f},
+        {0.0f, t},
+        {t, t},
+    };
+    std::vector<glm::vec3> normals(4, {0.0f, -1.0f, 0.0f});
+    std::vector<glm::vec4> tangents(4, {1.0f, 0.0f, 0.0f, 1.0f});
+    std::vector<uint32_t> indices = { 0, 1, 2, 1, 3, 2 };
+
+    return Mesh()
+        .set_positions(std::move(positions))
+        .set_normals(std::move(normals))
+        .set_tangents(std::move(tangents))
+        .set_tex_coords(std::move(tex_coords))
+        .set_indices(std::move(indices));
+}
+
 class App {
 public:
     App() = default;
@@ -207,7 +231,6 @@ private:
 
         PerformanceCounter perf_counter;
         Instant last_frame = Instant::now();
-        Instant loop_start = Instant::now();
         while (true) {
             auto delta_time = last_frame.elapsed_seconds<float>();
             last_frame = Instant::now();
@@ -220,10 +243,6 @@ private:
                     case WindowEvent::CloseRequested:
                         return;
                 }
-            }
-
-            if (loop_start.elapsed_seconds<float>() > 6.0f) {
-                this->renderer.free_texture(this->base_color);
             }
 
             this->update(delta_time);
@@ -245,11 +264,13 @@ private:
 
     void start() {
         this->window.set_cursor_locked(true);
-        //TextureId base_color;
+
+        TextureId base_color;
         TextureId normal_map;
         TextureId aorm_map;
+        TextureId displacement_map;
         if (auto image = Image::load("../images/rocks.jpg"); image != std::nullopt) {
-            this->base_color = this->renderer.add_texture(image->set_sampler(Sampler::LinearRepeat));
+            base_color = this->renderer.add_texture(image->set_sampler(Sampler::LinearRepeat));
         }
         if (auto image = Image::load("../images/rocksaorm.png"); image != std::nullopt) {
             aorm_map = this->renderer.add_texture(
@@ -263,11 +284,18 @@ private:
                     .set_format(ImageFormat::Rgba8)
             );
         }
+        if (auto image = Image::load("../images/rocksdisplacement.jpg"); image != std::nullopt) {
+            displacement_map = this->renderer.add_texture(
+                image->set_sampler(Sampler::LinearRepeat)
+                    .set_format(ImageFormat::R8)
+            );
+        }
         
         MaterialId material = this->renderer.add_material(
             Material()
-                .set_base_color_texture(this->base_color)
+                .set_base_color_texture(base_color)
                 .set_normal_map(normal_map)
+                .set_displacement_map(displacement_map)
                 .set_ao_roughness_metallic_map(aorm_map)
         );
         this->renderer.use_material(material);
@@ -316,8 +344,6 @@ private:
     Controller controller;
     
     bool paused = false;
-
-    TextureId base_color;
 };
 
 int main() {

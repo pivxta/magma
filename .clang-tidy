@@ -4,4 +4,6 @@ Checks: >
   modernize-*,
   -modernize-use-trailing-return-type,
   -modernize-use-nodiscard
+CheckOptions:
+  bugprone-easily-swappable-parameters.MinimumLength: '3'
 HeaderFilterRegex: '^.*/src/.*$'

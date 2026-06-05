@@ -1,58 +1,67 @@
 #include "materialmanager.h"
 #include "texturemanager.h"
 #include <spdlog/spdlog.h>
+#include <vulkan/vulkan.hpp>
 
 struct MaterialData {
     TextureIndices base_color;
     TextureIndices normal_map;
+    TextureIndices displacement_map;
     TextureIndices aorm_map;
+
     alignas(16) glm::vec3 base_color_factor;
     float normal_factor;
+    float displacement_factor;
     float roughness_factor;
     float metallic_factor;
+
     float ior;
 };
 
-static std::vector<const TextureId*> get_material_textures(const Material& material) {
-    std::vector<const TextureId*> textures;
-    if (material.base_color_texture.has_value()) {
-        textures.push_back(&*material.base_color_texture);
-    }
-    if (material.normal_map.has_value()) {
-        textures.push_back(&*material.normal_map);
-    }
-    if (material.ao_roughness_metallic_map.has_value()) {
-        textures.push_back(&*material.ao_roughness_metallic_map);
-    }
-    return textures;
+static bool material_has_texture(const Material& material, const TextureId& texture) {
+    return material.base_color_texture == texture
+        || material.normal_map == texture
+        || material.displacement_map == texture
+        || material.ao_roughness_metallic_map == texture;
 }
 
 static MaterialData get_material_data(const Material& material, const TextureManager& textures) {
     TextureIndices base_color_indices = material.base_color_texture.has_value() ?
         textures.get(*material.base_color_texture, TextureFallback::ColorError) :
         textures.get_fallback(TextureFallback::ColorWhite);
-    spdlog::info("Base color sampler index: {}", base_color_indices.sampler);
 
     TextureIndices normal_map_indices = material.normal_map.has_value() ?
         textures.get(*material.normal_map, TextureFallback::Normal) :
         textures.get_fallback(TextureFallback::Normal);
 
+    TextureIndices displacement_map_indices = material.displacement_map.has_value() ?
+        textures.get(*material.displacement_map, TextureFallback::Displacement) :
+        textures.get_fallback(TextureFallback::Displacement);
+
     TextureIndices aorm_map_indices = material.ao_roughness_metallic_map.has_value() ?
         textures.get(*material.ao_roughness_metallic_map, TextureFallback::AoRoughnessMetallic) :
         textures.get_fallback(TextureFallback::AoRoughnessMetallic);
 
+    float displacement_factor = 0.0f;
+    if (material.displacement_map.has_value()) {
+        displacement_factor = material.displacement_factor;
+    }
+
     return {
         .base_color = base_color_indices, 
         .normal_map = normal_map_indices, 
+        .displacement_map = displacement_map_indices,
         .aorm_map = aorm_map_indices,
         .base_color_factor = material.base_color_factor,
         .normal_factor = material.normal_factor,
+        .displacement_factor = displacement_factor,
         .roughness_factor = material.roughness_factor,
         .metallic_factor = material.metallic_factor,
         .ior = material.ior,
     };
 }
 
+/*
 static vk::DescriptorPool create_descriptor_pool(vk::Device device, uint32_t frames_in_flight) {
     std::array pool_sizes = {
         vk::DescriptorPoolSize()
@@ -81,7 +90,7 @@ static vk::DescriptorSetLayout create_set_layout(vk::Device device) {
     );
     vk_expect(result1, "Failed to create descriptor set layout");
     return layout;
-}
+}*/
 
 template<typename T>
 static std::vector<vk::DescriptorSet> create_sets(
@@ -120,15 +129,19 @@ static std::vector<vk::DescriptorSet> create_sets(
 
 template<typename T>
 static std::vector<Buffer<T>> create_buffers(
+    vk::Device device,
     vma::Allocator allocator,
     uint32_t frames_in_flight,
     uint32_t max_materials
 ) {
     std::vector<Buffer<T>> buffers;
+    buffers.reserve(frames_in_flight);
     for (uint32_t i = 0; i < frames_in_flight; i++) {
-        buffers.push_back(create_mapped_buffer<T>(
+        buffers.push_back(create_mapped_buffer_bda<T>(
+            device,
             allocator, 
-            vk::BufferUsageFlagBits::eStorageBuffer,
+            vk::BufferUsageFlagBits::eStorageBuffer 
+                | vk::BufferUsageFlagBits::eShaderDeviceAddress,
             max_materials
         ));
     }
@@ -146,16 +159,25 @@ MaterialManager::MaterialManager(
     dirty(frames_in_flight),
     materials(max_materials)
 {
+    /*
     this->desc_pool = create_descriptor_pool(device, frames_in_flight);
     this->desc_set_layout = create_set_layout(device);
-    this->buffers = create_buffers<MaterialData>(allocator, frames_in_flight, max_materials);
-    this->desc_sets = create_sets(device, this->desc_pool, this->desc_set_layout, this->buffers);
+    */
+    this->buffers = create_buffers<MaterialData>(
+        device, 
+        allocator, 
+        frames_in_flight, 
+        max_materials
+    );
+    //this->desc_sets = create_sets(device, this->desc_pool, this->desc_set_layout, this->buffers);
     this->fallback = this->add(Material {});
 }
 
 void MaterialManager::destroy() {
+    /*
     this->device.destroyDescriptorSetLayout(this->desc_set_layout);
     this->device.destroyDescriptorPool(this->desc_pool);
+    */
     for (auto& buffer: this->buffers) {
         buffer.destroy(this->allocator);
     }
@@ -169,17 +191,22 @@ static SlotKey<Material> get_slot_key(const MaterialId& id) {
 }
 
 void MaterialManager::flag_dirty_materials(const TextureManager& texture_manager) {
-    for (const auto& texture: texture_manager.get_updated()) {
-        if (!this->dependency_map.contains(texture)) {
-            continue;
-        }
-        for (const auto& [material, count]: this->dependency_map[texture]) {
-            SlotKey key = get_slot_key(material);
-            if (auto slot = this->materials.get(key); slot != nullptr) {
-                this->set_dirty(key);
+    const auto& updated_textures = texture_manager.get_updated();
+    if (updated_textures.empty()) {
+        return;
+    }
+    this->materials.for_each([&](SlotKey<Material> key, const Material& material) {
+        bool uses_updated_texture = false;
+        for (auto updated_texture: updated_textures) {
+            if (material_has_texture(material, updated_texture)) {
+                uses_updated_texture = true;
+                break;
             }
         }
-    }
+        if (uses_updated_texture) {
+            this->set_dirty(key);
+        }
+    });
 }
 
 void MaterialManager::update_dirty(const TextureManager& texture_manager, uint32_t frame_index) {
@@ -187,12 +214,12 @@ void MaterialManager::update_dirty(const TextureManager& texture_manager, uint32
         return;
     }
 
-    uint32_t write_start = this->buffers[frame_index].length;
-    uint32_t write_end = 0;
+    vk::DeviceSize write_start = this->buffers[frame_index].length;
+    vk::DeviceSize write_end = 0;
     MaterialData* mapped_data = this->buffers[frame_index].get_mapped();
     for (auto key: this->dirty[frame_index]) {
-        write_start = std::min(write_start, key.index);
-        write_end = std::max(write_end, key.index + 1);
+        write_start = std::min(write_start, static_cast<vk::DeviceSize>(key.index));
+        write_end = std::max(write_end, static_cast<vk::DeviceSize>(key.index) + 1);
 
         if (auto material = this->materials.get(key); material != nullptr) {
             mapped_data[key.index] = get_material_data(*material, texture_manager);
@@ -218,10 +245,7 @@ MaterialId MaterialManager::add(const Material& material) {
         .index = material_key->index,
         .generation = material_key->generation
     };
-    for (auto texture: get_material_textures(material)) {
-        this->add_dependency(id, *texture);
-    }
-
+    
     return id;
 }
 
@@ -232,63 +256,20 @@ const Material* MaterialManager::get(MaterialId id) const {
 void MaterialManager::set(MaterialId id, const Material& material) {
     SlotKey key = get_slot_key(id);
     if (auto slot = this->materials.get(key); slot != nullptr) {
-        for (auto texture: get_material_textures(*slot)) {
-            this->remove_dependency(id, *texture);
-        }
-        for (auto texture: get_material_textures(material)) {
-            this->add_dependency(id, *texture);
-        }
         *slot = material;
+        this->set_dirty(key);
     }
-    this->set_dirty(key);
 }
 
 void MaterialManager::free(MaterialId id) {
     SlotKey key = get_slot_key(id);
-    if (auto slot = this->materials.get(key); slot != nullptr) {
-        for (auto texture: get_material_textures(*slot)) {
-            this->remove_dependency(id, *texture);
-        }
-    }
-    this->materials.free(get_slot_key(id), [](Material&){});
-    this->set_dirty(key);
+    this->materials.free(key, [&](Material&){
+        this->set_dirty(key);
+    });
 }
 
 void MaterialManager::set_dirty(SlotKey<Material> key) {
     for (auto& dirty: this->dirty) {
         dirty.push_back(key);
-    }
-}
-
-void MaterialManager::add_dependency(MaterialId material, TextureId texture) {
-    if (!this->dependency_map.contains(texture)) {
-        std::unordered_map<MaterialId, uint32_t> count;
-        count[material] = 1;
-        this->dependency_map[texture] = std::move(count);
-    } else {
-        auto& count = this->dependency_map[texture];
-        if (count.contains(material)) {
-            count[material] += 1;
-        } else {
-            count[material] = 1;
-        }
-    }
-}
-
-void MaterialManager::remove_dependency(MaterialId material, TextureId texture) {
-    if (!this->dependency_map.contains(texture)) {
-        return;
-    }
-
-    auto& count = this->dependency_map[texture];
-    if (!count.contains(material)) {
-        return;
-    } 
-
-    auto& count_value = count[material];
-    if (count_value <= 1) {
-        count.erase(material);
-    } else {
-        count_value -= 1;
     }
 }

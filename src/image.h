@@ -5,7 +5,7 @@
 #include <vector>
 #include <span>
 
-enum class Sampler {
+enum class Sampler: uint8_t {
     LinearRepeat = 0,
     NearestRepeat,
     LinearMirrored,
@@ -15,7 +15,8 @@ enum class Sampler {
     Count,
 };
 
-enum class ImageFormat {
+enum class ImageFormat: uint8_t {
+    Undefined,
     R8,
     Rg8,
     Rgba8,
@@ -24,7 +25,7 @@ enum class ImageFormat {
     Rgba8Srgb,
 };
 
-enum class ImageColorspace {
+enum class ImageColorspace: uint8_t {
     Linear,
     Srgb
 };
@@ -36,12 +37,10 @@ struct ImageLoadInfo {
 struct Image {
     uint32_t width = 0;
     uint32_t height = 0;
-    std::optional<uint32_t> mip_levels;
-
-    ImageFormat format;
     std::vector<uint8_t> bytes;
-
+    ImageFormat format = ImageFormat::Undefined;
     Sampler sampler = Sampler::LinearRepeat;
+    std::optional<uint32_t> mip_levels;
 
     static std::optional<Image> load(
         const char *filename, 

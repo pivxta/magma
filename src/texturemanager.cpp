@@ -1,5 +1,6 @@
 #include "texturemanager.h"
 #include "buffer.h"
+#include "image.h"
 #include "vkerror.h"
 #include <cassert>
 #include <spdlog/spdlog.h>
@@ -162,7 +163,6 @@ TextureIndices TextureManager::get(TextureId id, TextureFallback fallback) const
     if (auto slot = this->slots.get(get_slot_key(id)); slot != nullptr) {
         return get_slot_indices(*slot);
     }
-    spdlog::info("Sampler index: {}", this->get_fallback_indices(fallback).sampler);
     return this->get_fallback_indices(fallback);
 }
 
@@ -360,10 +360,10 @@ void record_image_mip_generation(
                 )
         );
 
-        uint32_t src_width = std::max(texture.extent.width >> (mip_level - 1), 1u);
-        uint32_t src_height = std::max(texture.extent.height >> (mip_level - 1), 1u);
-        uint32_t dst_width = std::max(texture.extent.width >> mip_level, 1u);
-        uint32_t dst_height = std::max(texture.extent.height >> mip_level, 1u);
+        auto src_width = int32_t(std::max(texture.extent.width >> (mip_level - 1), 1u));
+        auto src_height = int32_t(std::max(texture.extent.height >> (mip_level - 1), 1u));
+        auto dst_width = int32_t(std::max(texture.extent.width >> mip_level, 1u));
+        auto dst_height = int32_t(std::max(texture.extent.height >> mip_level, 1u));
 
         std::array<vk::Offset3D, 2> src_offsets = {
             vk::Offset3D(0, 0, 0), 
@@ -443,7 +443,7 @@ void record_image_mip_generation(
 }
 
 static vk::Format get_image_format(ImageFormat image_format) {
-    vk::Format format;
+    vk::Format format = vk::Format::eUndefined;
     switch (image_format) {
         case ImageFormat::R8Srgb: format = vk::Format::eR8Srgb; break;
         case ImageFormat::Rg8Srgb: format = vk::Format::eR8G8Srgb; break; 
@@ -451,6 +451,7 @@ static vk::Format get_image_format(ImageFormat image_format) {
         case ImageFormat::R8: format = vk::Format::eR8Unorm; break;
         case ImageFormat::Rg8: format = vk::Format::eR8G8Unorm; break; 
         case ImageFormat::Rgba8: format = vk::Format::eR8G8B8A8Unorm; break;
+        case ImageFormat::Undefined: break;
     }
     return format;
 }
@@ -510,7 +511,6 @@ std::optional<SlotKey<Texture>> TextureManager::create_texture(
             command_pool,
             src
         );
-
         auto info = vk::DescriptorImageInfo()
             .setImageView(texture.view)
             .setImageLayout(vk::ImageLayout::eShaderReadOnlyOptimal);
@@ -550,20 +550,21 @@ static vk::SamplerAddressMode get_address_mode(Sampler sampler) {
 
 static vk::Filter get_filter(Sampler sampler) {
     switch (sampler) {
-        case Sampler::LinearRepeat: return vk::Filter::eLinear;
-        case Sampler::LinearMirrored: return vk::Filter::eLinear;
-        case Sampler::LinearClamp: return vk::Filter::eLinear;
-        case Sampler::NearestRepeat: return vk::Filter::eNearest;
-        case Sampler::NearestMirrored: return vk::Filter::eNearest;
-        case Sampler::NearestClamp: return vk::Filter::eNearest;
-        default: return vk::Filter::eNearest;
+        case Sampler::LinearRepeat:
+        case Sampler::LinearMirrored:
+        case Sampler::LinearClamp: 
+            return vk::Filter::eLinear;
+        case Sampler::NearestRepeat: 
+        case Sampler::NearestMirrored:
+        case Sampler::NearestClamp: 
+        default:
+            return vk::Filter::eNearest;
     }
 }
 
 static vk::Sampler create_sampler(vk::Device device, Sampler type) {
     vk::SamplerAddressMode address_mode = get_address_mode(type);
     vk::Filter filter = get_filter(type);
-    spdlog::info("Sampler type: {}, Filter type: {}", static_cast<int>(type), static_cast<int>(filter));
     auto info = vk::SamplerCreateInfo()
         .setMagFilter(filter)
         .setAddressModeU(address_mode)
@@ -599,7 +600,11 @@ void TextureManager::bind_samplers(
     vk::DescriptorSet set, 
     std::span<Sampler> types
 ) {
+    std::vector<vk::DescriptorImageInfo> infos;
+    infos.reserve(types.size());
     std::vector<vk::WriteDescriptorSet> writes;
+    writes.reserve(types.size());
+
     for (auto type: types) {
         uint32_t index = get_sampler_index(type);
         vk::Sampler sampler = this->samplers[index];
@@ -607,14 +612,14 @@ void TextureManager::bind_samplers(
             continue;
         }
 
-        auto info = vk::DescriptorImageInfo().setSampler(sampler);
+        infos.push_back(vk::DescriptorImageInfo().setSampler(sampler));
         writes.push_back(
             vk::WriteDescriptorSet()
                 .setDstSet(set)
                 .setDstBinding(1)
                 .setDstArrayElement(index)
                 .setDescriptorType(vk::DescriptorType::eSampler)
-                .setImageInfo(info)
+                .setImageInfo(infos.back())
         );
     }
     device.updateDescriptorSets(writes, {});
@@ -657,6 +662,14 @@ static Image create_normal_fallback() {
         .set_bytes({127, 127, 255, 255});
 }
 
+static Image create_displacement_fallback() {
+    return Image()
+        .set_size(1, 1)
+        .set_format(ImageFormat::R8)
+        .set_sampler(Sampler::NearestRepeat)
+        .set_bytes({0});
+}
+
 static Image create_aorm_fallback() {
     return Image()
         .set_size(1, 1)
@@ -670,10 +683,11 @@ static Image create_fallback_image(TextureFallback type) {
         case TextureFallback::ColorWhite: return create_color_white_fallback();
         case TextureFallback::ColorError: return create_color_fallback();
         case TextureFallback::Normal: return create_normal_fallback();
+        case TextureFallback::Displacement: return create_displacement_fallback();
         case TextureFallback::AoRoughnessMetallic: return create_aorm_fallback();
         case TextureFallback::Count: break;
     }
-    return Image();
+    return {};
 }
 
 void TextureManager::create_fallbacks(vk::Queue queue, vk::CommandPool command_pool) {

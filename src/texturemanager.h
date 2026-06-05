@@ -1,8 +1,7 @@
 #pragma once
-#include <memory>
 #include <cstdint>
 #include <vector>
-#include <unordered_map>
+#include <span>
 #include <vulkan/vulkan.hpp>
 #include <vk_mem_alloc.hpp>
 #include "image.h"
@@ -11,10 +10,11 @@
 #include "resource.h"
 #include "textureindices.h"
 
-enum class TextureFallback {
+enum class TextureFallback: uint8_t {
     ColorError,
     ColorWhite,
     Normal,
+    Displacement,
     AoRoughnessMetallic,
     Count,
 };

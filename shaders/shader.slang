@@ -1,11 +1,11 @@
-struct VertexInput {
+struct Vertex {
     float3 position;
     float3 normal;
     float4 tangent;
     float2 tex_coords;
 }
 
-struct InstanceInput {
+struct Instance {
     float3 local_to_world_x;
     float3 local_to_world_y;
     float3 local_to_world_z;
@@ -33,6 +33,14 @@ struct InstanceInput {
     }
 }
 
+struct DrawConstants {
+    ImmutablePtr<Instance> instances;
+    ImmutablePtr<Vertex> vertices;
+    ImmutablePtr<Material> materials;
+}
+
+[[vk::push_constant]] DrawConstants constants;
+
 struct VertexOutput {
     float4 sv_position : SV_Position;
     float2 tex_coords;
@@ -41,17 +49,19 @@ struct VertexOutput {
     float3 tangent;
     nointerpolation float handedness;
     nointerpolation uint32_t material_index;
-};
+}
 
 struct ViewUniforms {
     float4x4 world_to_clip;
-};
+}
 
 [[vk::binding(0, 0)]]
 ConstantBuffer<ViewUniforms> view;
 
 [shader("vertex")]
-VertexOutput vertexMain(VertexInput vertex, InstanceInput instance) {
+VertexOutput vertexMain(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
+    Instance instance = constants.instances[instance_id];
+    Vertex vertex = constants.vertices[vertex_id];
     float3 world_position = instance.transform_point(vertex.position);
     float3 world_normal = instance.transform_normal(vertex.normal);
     float3 world_tangent = instance.transform_vector(vertex.tangent.xyz);
@@ -169,6 +179,18 @@ struct PointLight: Light {
     }
 };
 
+float shadow_terminator_mask(float3 omega_i, float3 normal, float3 geometry_normal) {
+    float wi_dot_n = max(dot(normal, omega_i), 0.0);
+    float wi_dot_g = max(dot(geometry_normal, omega_i), 0.0);
+    float g_dot_n = max(dot(geometry_normal, normal), 0.0);
+
+    if (wi_dot_n <= 0.0 || wi_dot_g <= 0.0 || g_dot_n <= 0.0)
+        return 0.0;
+
+    float g = min(wi_dot_g / (wi_dot_n * g_dot_n), 1.0);
+    return g * (g * (1.0 - g) + 1.0);
+}
+
 float3 calculate_radiance<B: Brdf, L: Light>(
     L light,
     B brdf,
@@ -177,9 +199,11 @@ float3 calculate_radiance<B: Brdf, L: Light>(
 ) {
     let omega_i = light.get_omega_i(fragment.position);
     let omega_o = normalize(view_position - fragment.position);
+    let shadow_mask = shadow_terminator_mask(omega_i, fragment.normal, fragment.geometry_normal);
     return brdf.calculate(fragment, omega_i, omega_o)
-        * light.get_incident_radiance(fragment.position)
-        * max(dot(omega_i, fragment.normal), 0.0);
+            * light.get_incident_radiance(fragment.position)
+            * max(dot(omega_i, fragment.normal), 0.0)
+            * shadow_mask;
 }
 
 struct TextureIndices {
@@ -195,31 +219,104 @@ struct MaterialFragmentProperties<B: Brdf> {
 struct Material {
     TextureIndices base_color;
     TextureIndices normal_map;
+    TextureIndices displacement_map;
     TextureIndices aorm_map;
+
     float3 base_color_factor;
     float normal_factor;
+    float displacement_factor;
     float roughness_factor;
     float metallic_factor;
+
     float ior;
 
+    float2 parallax_displace(
+        float3 local_view_dir,
+        float2 tex_coords,
+        float displacement_factor,
+        Texture2D displacement_texture,
+        SamplerState displacement_sampler
+    ) {
+        const float min_layers = 4.0;
+        const float max_layers = 12.0;
+
+        let num_layers = lerp(max_layers, min_layers, abs(local_view_dir.z));
+        let layer_depth = 1.0 / num_layers;
+        var current_layer_depth = 0.0;
+
+        let dx = ddx(tex_coords);
+        let dy = ddy(tex_coords);
+
+        let delta_tex_coords = (local_view_dir.xy * displacement_factor / local_view_dir.z) / num_layers;
+        var current_tex_coords = tex_coords;
+        var current_depth = 1.0 - displacement_texture.SampleGrad(
+            displacement_sampler, 
+            current_tex_coords, 
+            dx, dy
+        ).r;
+
+        [loop]
+        while (current_layer_depth < current_depth) {
+            current_tex_coords -= delta_tex_coords;
+            current_layer_depth += layer_depth;
+            current_depth = 1.0 - displacement_texture.SampleGrad(
+                displacement_sampler, 
+                current_tex_coords, 
+                dx, dy
+            ).r;
+        }
+
+        let prev_tex_coords = current_tex_coords + delta_tex_coords;
+        let after_depth  = current_depth - current_layer_depth;
+        let before_depth = 
+            (1.0 - displacement_texture.SampleGrad(displacement_sampler, prev_tex_coords, dx, dy).r)
+                - current_layer_depth 
+                + layer_depth;
+
+        let weight = after_depth / (after_depth - before_depth);
+        return lerp(current_tex_coords, prev_tex_coords, weight);
+    }
+
     MaterialFragmentProperties<CookTorranceBrdf> get_fragment_properties(
+        float3 view_position,
         float3 position,
         float3 normal,
         float3 tangent,
         float tangent_handedness,
         float2 tex_coords
     ) {
+        var geometry_normal = normalize(normal);
+        var tangent = normalize(tangent);
+        var bitangent = tangent_handedness * cross(geometry_normal, tangent);
+
+        var disp_tex_coords = tex_coords;
+        if (this.displacement_factor >= 0.0001) {
+            let view_dir = normalize(view_position - position);
+            let local_view_dir = float3(
+                dot(view_dir, tangent),
+                dot(view_dir, bitangent),
+                dot(view_dir, geometry_normal)
+            );
+
+            let displacement_map_texture = textures[NonUniformResourceIndex(this.displacement_map.texture)];
+            let displacement_map_sampler = samplers[NonUniformResourceIndex(this.displacement_map.sampler)];
+            disp_tex_coords = parallax_displace(
+                local_view_dir,
+                tex_coords,
+                displacement_factor,
+                displacement_map_texture,
+                displacement_map_sampler
+            );
+        }
+
         var base_color_texture = textures[NonUniformResourceIndex(this.base_color.texture)];
         var base_color_sampler = samplers[NonUniformResourceIndex(this.base_color.sampler)];
         var base_color = this.base_color_factor;
-        base_color *= base_color_texture.Sample(base_color_sampler, tex_coords).rgb;
+        base_color *= base_color_texture.Sample(base_color_sampler, disp_tex_coords).rgb;
 
         var normal_map_texture = textures[NonUniformResourceIndex(this.normal_map.texture)];
         var normal_map_sampler = samplers[NonUniformResourceIndex(this.normal_map.sampler)];
-        var geometry_normal = normalize(normal);
-        var tangent = normalize(tangent);
-        var bitangent = tangent_handedness * cross(normal, tangent);
-        var local_normal = (2.0 * normal_map_texture.Sample(normal_map_sampler, tex_coords).xyz) - 1.0;
+        var local_normal = (2.0 * normal_map_texture.Sample(normal_map_sampler, disp_tex_coords).xyz) - 1.0;
         local_normal = normalize(local_normal);
         var normal = normalize(
             local_normal.z * geometry_normal 
@@ -230,7 +327,7 @@ struct Material {
         var aorm_map_texture = textures[NonUniformResourceIndex(this.aorm_map.texture)];
         var aorm_map_sampler = samplers[NonUniformResourceIndex(this.aorm_map.sampler)];
         var aorm = float3(1.0, this.roughness_factor, this.metallic_factor);
-        aorm *= aorm_map_texture.Sample(aorm_map_sampler, tex_coords).rgb;
+        aorm *= aorm_map_texture.Sample(aorm_map_sampler, disp_tex_coords).rgb;
 
         FragmentProperties fragment;
         fragment.base_color = base_color;
@@ -243,7 +340,7 @@ struct Material {
         brdf.alpha = aorm.g * aorm.g;
         brdf.metallic = aorm.b;
         brdf.ior = this.ior;
-
+        
         return {
             fragment,
             brdf
@@ -270,13 +367,16 @@ StructuredBuffer<PointLight> point_lights;
 Texture2D[] textures;
 [[vk::binding(1, 1)]]
 SamplerState[] samplers;
+/*
 [[vk::binding(0, 2)]]
 StructuredBuffer<Material> materials;
+*/
 
 
 [shader("fragment")]
 float4 fragmentMain(FragmentInput input) : SV_Target {
-    let props = materials[input.material_index].get_fragment_properties(
+    let props = constants.materials[input.material_index].get_fragment_properties(
+        light.view_position,
         input.position,
         input.normal,
         input.tangent,

@@ -75,7 +75,7 @@ function(add_shaders TARGET)
             COMMAND ${CMAKE_COMMAND} -E make_directory ${OUTPUT_DIR}
             COMMAND ${SLANGC_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/${SHADER}
-                -target spirv -profile spirv_1_4
+                -target spirv -profile spirv_1_5
                 -emit-spirv-directly -fvk-use-entrypoint-name
                 -o ${OUTPUT_SPV}
             DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${SHADER}

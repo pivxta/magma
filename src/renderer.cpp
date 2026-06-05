@@ -11,6 +11,8 @@
 #include "buffer.h"
 #include "texturemanager.h"
 #include "materialmanager.h"
+#include "time.h"
+#include <span>
 #include <vector>
 #include <optional>
 #include <iostream>
@@ -153,6 +155,12 @@ struct Instance {
     }
 };
 
+struct DrawConstants {
+    vk::DeviceAddress instances;
+    vk::DeviceAddress vertices;
+    vk::DeviceAddress materials;
+};
+
 struct ViewUniforms {
     glm::mat4 world_to_clip;
 };
@@ -278,6 +286,10 @@ struct Renderer::Inner {
 
     MaterialId add_material(const Material& material) {
         return this->material_manager.add(material);
+    }
+
+    const Material* get_material(MaterialId id) {
+        return this->material_manager.get(id);
     }
 
     void set_material(MaterialId id, const Material& material) {
@@ -451,6 +463,8 @@ private:
                     .setSynchronization2(true),
                 
                 vk::PhysicalDeviceVulkan12Features()
+                    .setScalarBlockLayout(true)
+                    .setBufferDeviceAddress(true)
                     .setDescriptorIndexing(true)
                     .setRuntimeDescriptorArray(true)
                     .setDescriptorBindingPartiallyBound(true)
@@ -484,6 +498,7 @@ private:
             .setVkGetDeviceProcAddr(vkGetDeviceProcAddr);
 
         auto vma_info = vma::AllocatorCreateInfo()
+            .setFlags(vma::AllocatorCreateFlagBits::eBufferDeviceAddress)
             .setInstance(this->instance)
             .setDevice(this->device)
             .setPhysicalDevice(this->physical_device)
@@ -558,24 +573,26 @@ private:
                 .setPName("fragmentMain"),
         };
 
+        /*
         std::array bindings = {
+            
             vk::VertexInputBindingDescription()
                 .setBinding(0)
                 .setStride(sizeof(Vertex))
                 .setInputRate(vk::VertexInputRate::eVertex),
             vk::VertexInputBindingDescription()
-                .setBinding(1)
+                .setBinding(0)
                 .setStride(sizeof(Instance))
                 .setInputRate(vk::VertexInputRate::eInstance)
         };
 
         std::vector<vk::VertexInputAttributeDescription> attributes;
-        Vertex::get_attributes(attributes, 0, 0);
-        Instance::get_attributes(attributes, 1, 4);
+        //Vertex::get_attributes(attributes, 0, 0);
+        Instance::get_attributes(attributes, 0, 0);*/
 
-        auto vertex_state = vk::PipelineVertexInputStateCreateInfo()
-            .setVertexBindingDescriptions(bindings)
-            .setVertexAttributeDescriptions(attributes);
+        auto vertex_state = vk::PipelineVertexInputStateCreateInfo();
+            //.setVertexBindingDescriptions(bindings)
+            //.setVertexAttributeDescriptions(attributes);
 
         auto raster_state = vk::PipelineRasterizationStateCreateInfo()
             .setPolygonMode(vk::PolygonMode::eFill)
@@ -623,10 +640,17 @@ private:
         std::array set_layouts = {
             this->frame_set_layout,
             this->texture_manager.descriptor_set_layout(),
-            this->material_manager.descriptor_set_layout(),
+        };
+        std::array push_constant_ranges = {
+            vk::PushConstantRange()
+                .setOffset(0)
+                .setSize(sizeof(DrawConstants))
+                .setStageFlags(vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment)
         };
         auto [result2, pipeline_layout] = this->device.createPipelineLayout(
-            vk::PipelineLayoutCreateInfo().setSetLayouts(set_layouts)
+            vk::PipelineLayoutCreateInfo()
+                .setSetLayouts(set_layouts)
+                .setPushConstantRanges(push_constant_ranges)
         );
         vk_expect(result2, "Failed to create pipeline layout");
 
@@ -702,57 +726,45 @@ private:
             return;
         }
 
-        std::optional<Buffer<uint32_t>> index_buffer;
-        bool has_indices = mesh.indices != std::nullopt;
-        if (has_indices) {
-            index_buffer = this->create_gpu_buffer<uint32_t>(
-                vk::BufferUsageFlagBits::eIndexBuffer 
-                    | vk::BufferUsageFlagBits::eTransferDst,
-                mesh.indices->size()
-            );
-        }
-        
-        Buffer vertex_buffer = this->create_gpu_buffer<Vertex>(
-            vk::BufferUsageFlagBits::eVertexBuffer 
-                | vk::BufferUsageFlagBits::eTransferDst,
-            vertices.size()
-        );
+        vk::DeviceSize vertices_offset = this->current_buffer_offset;
+        vk::DeviceSize vertices_size = vertices.size() * sizeof(Vertex);
+        this->current_buffer_offset += vertices_size;
 
-        Buffer vertex_staging = this->create_mapped_buffer_init<Vertex>(
+        vk::DeviceSize indices_offset = vertices_size;
+        vk::DeviceSize indices_count = mesh.indices.has_value() ? 
+            mesh.indices.value().size() : 0;
+        vk::DeviceSize indices_size = indices_count * sizeof(uint32_t);
+        this->current_buffer_offset += indices_size;
+
+        vk::DeviceSize staging_size = vertices_size + indices_size;
+        UntypedBuffer staging = this->create_mapped_untyped_buffer(
             vk::BufferUsageFlagBits::eTransferSrc,
-            std::span(vertices)
+            staging_size
         );
-    
-        Buffer<uint32_t> index_staging; 
-        if (has_indices) {
-            index_staging = this->create_mapped_buffer_init<uint32_t>(
-                vk::BufferUsageFlagBits::eTransferSrc,
-                std::span(*mesh.indices)
+        memcpy(staging.mapped, vertices.data(), vertices_size);
+        if (mesh.indices.has_value()) {
+            memcpy(
+                reinterpret_cast<uint8_t*>(staging.mapped) + indices_offset, 
+                mesh.indices.value().data(), 
+                indices_size
             );
         }
-        
+
         vk::CommandBuffer command_buffer = this->begin_one_shot_commands();
         command_buffer.copyBuffer(
-            vertex_staging,
-            vertex_buffer,
-            vk::BufferCopy().setSize(vertex_buffer.size_bytes())
+            staging,
+            this->static_buffer,
+            vk::BufferCopy().setSize(staging_size)
         );
-        if (has_indices) {
-            command_buffer.copyBuffer(
-                index_staging,
-                *index_buffer, 
-                vk::BufferCopy().setSize(index_buffer->size_bytes())
-            );
-        }
         this->submit_one_shot_commands_sync(command_buffer);
-        
-        vertex_staging.destroy(this->allocator);
-        if (has_indices) {
-            index_staging.destroy(this->allocator);
-        }
+        staging.destroy(this->allocator);
 
-        this->vertex_buffer = vertex_buffer;
-        this->index_buffer = index_buffer;
+        this->vertices_offset = vertices_offset;
+        this->vertices_size = vertices_size;
+        this->vertex_count = uint32_t(vertices.size());
+        this->indices_offset = indices_offset;
+        this->indices_size = indices_size;
+        this->index_count = indices_count;
     }
 
     void create_buffers() {
@@ -777,11 +789,20 @@ private:
             }
         }
 
-        Buffer instance_buffer = this->create_gpu_buffer<Instance>(
-            vk::BufferUsageFlagBits::eVertexBuffer 
+        UntypedBuffer static_buffer = this->create_bda_gpu_buffer(
+            vk::BufferUsageFlagBits::eIndexBuffer
+                | vk::BufferUsageFlagBits::eStorageBuffer
                 | vk::BufferUsageFlagBits::eTransferDst,
-            instances.size()
+            vk::DeviceSize(16 * 1024 * 1024)
         );
+
+        UntypedBuffer instance_buffer = this->create_bda_mapped_buffer(
+            vk::BufferUsageFlagBits::eStorageBuffer 
+                | vk::BufferUsageFlagBits::eTransferDst,
+            instances.size() * sizeof(Instance)
+        );
+        memcpy(instance_buffer.mapped, instances.data(), instances.size() * sizeof(Instance));
+
         DynOffsetBuffer view_uniform_buffer = this->create_dyn_offset_buffer<ViewUniforms>(
             vk::BufferUsageFlagBits::eUniformBuffer, 1
         );
@@ -797,21 +818,9 @@ private:
             MAX_POINT_LIGHTS
         );
 
-        Buffer instance_staging = this->create_mapped_buffer_init<Instance>(
-            vk::BufferUsageFlagBits::eTransferSrc,
-            std::span(instances)
-        );
-
-        vk::CommandBuffer command_buffer = this->begin_one_shot_commands();
-        command_buffer.copyBuffer(
-            instance_staging,
-            instance_buffer,
-            vk::BufferCopy().setSize(instance_buffer.size_bytes())
-        );
-        this->submit_one_shot_commands_sync(command_buffer);
-
-        instance_staging.destroy(this->allocator);
-
+        this->static_buffer = static_buffer;
+        this->current_buffer_offset = 0;
+        this->instance_count = uint32_t(instances.size());
         this->instance_buffer = instance_buffer;
         this->view_uniform_buffer = view_uniform_buffer;
         this->light_uniform_buffer = light_uniform_buffer;
@@ -823,12 +832,21 @@ private:
         this->dir_light_buffer.destroy(this->allocator);
         this->point_light_buffer.destroy(this->allocator);
         this->instance_buffer.destroy(this->allocator);
-        this->vertex_buffer.destroy(this->allocator);
-        if (this->index_buffer != std::nullopt) {
-            this->index_buffer->destroy(this->allocator);
-        }
+        this->static_buffer.destroy(this->allocator);
         this->view_uniform_buffer.destroy(this->allocator);
         this->light_uniform_buffer.destroy(this->allocator);
+    }
+
+    UntypedBuffer create_mapped_untyped_buffer(vk::BufferUsageFlags usage, vk::DeviceSize size) {
+        return ::create_mapped_untyped_buffer(this->allocator, usage, size);
+    }
+
+    UntypedBuffer create_bda_mapped_buffer(vk::BufferUsageFlags usage, vk::DeviceSize size) {
+        return ::create_mapped_untyped_buffer_bda(this->device, this->allocator, usage, size);
+    }
+
+    UntypedBuffer create_bda_gpu_buffer(vk::BufferUsageFlags usage, vk::DeviceSize size) {
+        return ::create_gpu_untyped_buffer_bda(this->device, this->allocator, usage, size);
     }
 
     template<typename T>
@@ -974,8 +992,8 @@ private:
 
     void set_mapped_uniforms() {
         vk::Extent2D viewport_size = this->swapchain.get_extent();
-        float viewport_width = viewport_size.width;
-        float viewport_height = viewport_size.height;
+        auto viewport_width = static_cast<float>(viewport_size.width);
+        auto viewport_height = static_cast<float>(viewport_size.height);
 
         this->view_uniform_buffer.write_one(this->frame_index, ViewUniforms{
             .world_to_clip = this->camera.world_to_clip(viewport_width, viewport_height),
@@ -995,6 +1013,17 @@ private:
     }
 
     void record_frame_commands(vk::CommandBuffer command_buffer, const SwapchainImage& image) {
+        DrawConstants draw_constants = {
+            .instances = this->instance_buffer.address,
+            .vertices = this->static_buffer.address + this->vertices_offset,
+            .materials = this->material_manager.buffer_device_address(this->frame_index)
+        };
+        command_buffer.pushConstants<DrawConstants>(
+            this->pipeline_layout,
+            vk::ShaderStageFlagBits::eVertex 
+                | vk::ShaderStageFlagBits::eFragment,
+            0, {draw_constants}
+        );
         auto subresource_range = vk::ImageSubresourceRange()
             .setAspectMask(vk::ImageAspectFlagBits::eColor)
             .setBaseMipLevel(0)
@@ -1088,7 +1117,6 @@ private:
             {
                 this->frame_set, 
                 this->texture_manager.descriptor_set(), 
-                this->material_manager.descriptor_set(this->frame_index)
             },
             {
                 this->view_uniform_buffer.offset(this->frame_index),
@@ -1097,18 +1125,12 @@ private:
                 this->point_light_buffer.offset(this->frame_index),
             }
         );
-        if (this->index_buffer != std::nullopt) {
-            command_buffer.bindIndexBuffer(*this->index_buffer, 0, vk::IndexType::eUint32);
-        }
-        command_buffer.bindVertexBuffers(0, (vk::Buffer)this->vertex_buffer, {0});
-        command_buffer.bindVertexBuffers(1, (vk::Buffer)this->instance_buffer, {0});
-        if (this->index_buffer != std::nullopt) {
-            command_buffer.drawIndexed(
-                static_cast<uint32_t>(this->index_buffer->length), 
-                static_cast<uint32_t>(this->instance_buffer.length), 
-                0, 0, 0
-            );
-        }
+        command_buffer.bindIndexBuffer(this->static_buffer, this->indices_offset, vk::IndexType::eUint32);
+        command_buffer.drawIndexed(
+            this->index_count, 
+            this->instance_count, 
+            0, 0, 0
+        );
         command_buffer.endRendering();
     }
 
@@ -1228,10 +1250,19 @@ private:
     DynOffsetBuffer<DirectionalLight> dir_light_buffer;
     DynOffsetBuffer<PointLight> point_light_buffer;
 
-    Buffer<Instance> instance_buffer;
-    Buffer<Vertex> vertex_buffer;
-    std::optional<Buffer<uint32_t>> index_buffer;
+    UntypedBuffer instance_buffer;
+    uint32_t instance_count;
 
+    UntypedBuffer static_buffer;
+    vk::DeviceAddress current_buffer_offset;
+
+    vk::DeviceAddress vertices_offset;
+    vk::DeviceAddress vertices_size;
+    uint32_t vertex_count;
+    vk::DeviceAddress indices_offset;
+    vk::DeviceAddress indices_size;
+    uint32_t index_count;
+    
     TextureManager texture_manager;
     MaterialManager material_manager;
     MaterialId material;
@@ -1283,6 +1314,10 @@ void Renderer::resize() {
 
 MaterialId Renderer::add_material(const Material& material) {
     return this->inner->add_material(material);
+}
+
+const Material* Renderer::get_material(MaterialId id) {
+    return this->inner->get_material(id);
 }
 
 void Renderer::set_material(MaterialId id, const Material& material) {

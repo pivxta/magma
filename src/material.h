@@ -2,14 +2,16 @@
 #include <optional>
 #include <glm/vec3.hpp>
 #include "resource.h"
-#include "textureindices.h"
 
 struct Material {
     std::optional<TextureId> base_color_texture;
     std::optional<TextureId> normal_map;
+    std::optional<TextureId> displacement_map;
     std::optional<TextureId> ao_roughness_metallic_map;
+
     glm::vec3 base_color_factor = glm::vec3(0.5f);
     float normal_factor = 1.0f;
+    float displacement_factor = 0.0f;
     float roughness_factor = 0.5f;
     float metallic_factor = 0.0f;
     float ior = 1.5f;
@@ -31,6 +33,17 @@ struct Material {
 
     Material& set_normal_factor(float factor) {
         this->normal_factor = factor;
+        return *this;
+    }
+
+    Material& set_displacement_map(TextureId id) {
+        this->displacement_factor = 0.05f;
+        this->displacement_map = id;
+        return *this;
+    }
+
+    Material& set_displacement_factor(float factor) {
+        this->displacement_factor = factor;
         return *this;
     }
 

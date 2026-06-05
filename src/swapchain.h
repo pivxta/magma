@@ -35,9 +35,8 @@ class Target;
 
 class Swapchain {
 public:
-    Swapchain() {}
+    Swapchain() = default;
     Swapchain(vk::Instance instance, const std::shared_ptr<Target>& target);
-    ~Swapchain() {}
 
     void destroy(vk::Device device);
 

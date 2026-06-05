@@ -5,7 +5,7 @@
 
 static ImageFormat get_image_format(int byte_components, ImageColorspace colorspace) {
     assert(byte_components > 0 && byte_components != 3 && byte_components <= 4);
-    ImageFormat format;
+    ImageFormat format = ImageFormat::Undefined;
     if (colorspace == ImageColorspace::Srgb) {
         switch (byte_components) {
             case 1: format = ImageFormat::R8Srgb; break;
@@ -32,16 +32,15 @@ std::optional<Image> Image::load(const char* filename, const ImageLoadInfo& info
     if (components == 3) {
         components = 4; // Most GPUs dont support Rgb8 format, so we use Rgba8.
     }
-    spdlog::info("{}: {} channels", filename, components);
 
     uint8_t* loaded_bytes = stbi_load(filename, &width, &height, nullptr, components);
     if (loaded_bytes == nullptr) {
         return std::nullopt;
     }
 
-    size_t total_bytes = static_cast<uint32_t>(components)
-        * static_cast<uint32_t>(width)
-        * static_cast<uint32_t>(height);
+    size_t total_bytes = static_cast<size_t>(components)
+        * static_cast<size_t>(width)
+        * static_cast<size_t>(height);
 
     return Image()
         .set_size(static_cast<uint32_t>(width), static_cast<uint32_t>(height))

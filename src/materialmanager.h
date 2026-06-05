@@ -11,7 +11,7 @@ class TextureManager;
 
 class MaterialManager {
 public:
-    MaterialManager() {}
+    MaterialManager() = default;
     MaterialManager(
         vk::Device device, 
         vma::Allocator allocator, 
@@ -28,6 +28,10 @@ public:
     void set(MaterialId id, const Material& material);
     void free(MaterialId id);
 
+    vk::DeviceAddress buffer_device_address(uint32_t frame_index) const {
+        return this->buffers[frame_index].get_device_address();
+    }
+    /*
     vk::DescriptorSetLayout descriptor_set_layout() const {
         return this->desc_set_layout;
     }
@@ -35,20 +39,20 @@ public:
     vk::DescriptorSet descriptor_set(uint32_t frame_index) const {
         return this->desc_sets[frame_index];
     }
+        */
 
 private:
     void set_dirty(SlotKey<Material> key);
-    void add_dependency(MaterialId material, TextureId texture);
-    void remove_dependency(MaterialId material, TextureId texture);
 
     vk::Device device;
     vma::Allocator allocator;
 
+    /*
     vk::DescriptorPool desc_pool;
     vk::DescriptorSetLayout desc_set_layout;
     std::vector<vk::DescriptorSet> desc_sets;
+    */
 
-    std::unordered_map<TextureId, std::unordered_map<MaterialId, uint32_t>> dependency_map;
     std::vector<Buffer<MaterialData>> buffers;
     std::vector<std::vector<SlotKey<Material>>> dirty;
     SlotMap<Material> materials;

@@ -35,7 +35,7 @@ public:
         }
         if (!this->size_limit.has_value() || this->slots.size() < *this->size_limit) {
             T value;
-            uint32_t index = static_cast<uint32_t>(this->slots.size());
+            auto index = static_cast<uint32_t>(this->slots.size());
             this->slots.push_back({value, 1});
             return SlotKey<T>{index, 1};
         }
@@ -48,6 +48,26 @@ public:
             return key;
         }
         return std::nullopt;
+    }
+
+    void for_each(const std::function<void(SlotKey<T>, const T&)>& pred) const {
+        uint32_t index = 0;
+        for (const auto& slot: this->slots) {
+            if (slot.generation % 2 == 1) {
+                pred(SlotKey<T>{index, slot.generation}, slot.value);
+            }
+            index++;
+        }
+    }
+
+    void for_each(const std::function<void(SlotKey<T>, T&)>& pred) {
+        uint32_t index = 0;
+        for (auto& slot: this->slots) {
+            if (slot.generation % 2 == 1) {
+                pred(SlotKey<T>{index, slot.generation}, slot.value);
+            }
+            index++;
+        }
     }
  
     const T* get(SlotKey<T> key) const {
