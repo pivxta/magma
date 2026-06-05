@@ -4,6 +4,7 @@
 #include "vkerror.h"
 #include "stb_image.h"
 #include "target.h"
+#include "framearena.h"
 #include "camera.h"
 #include "image.h"
 #include "mesh.h"
@@ -12,7 +13,6 @@
 #include "texturemanager.h"
 #include "materialmanager.h"
 #include "time.h"
-#include <span>
 #include <vector>
 #include <optional>
 #include <iostream>
@@ -28,72 +28,27 @@
 #include <vulkan/vulkan.hpp>
 
 static constexpr uint32_t MAX_TEXTURES = 256;
-static constexpr uint32_t MAX_SAMPLERS = 128;
 static constexpr uint32_t MAX_MATERIALS = 256;
-static constexpr size_t MAX_POINT_LIGHTS = 256;
-static constexpr size_t MAX_DIRECTIONAL_LIGHTS = 128;
+static constexpr auto FRAME_ARENA_CAPACITY_PER_FIF = vk::DeviceSize(2 * 1024 * 1024);
 
-struct AmbientLight {
-    glm::vec3 color;
-    float illuminance;
+struct DrawConstants {
+    vk::DeviceAddress view_data;
+    vk::DeviceAddress light_data;
+    vk::DeviceAddress point_lights;
+    vk::DeviceAddress directional_lights;
+    vk::DeviceAddress instances;
+    vk::DeviceAddress vertices;
+    vk::DeviceAddress materials;
 };
 
-struct PointLight {
-    alignas(16) glm::vec3 position;
-    float radius;
-    alignas(16) glm::vec3 color;
-    float intensity;
-};
-
-struct DirectionalLight {
-    alignas(16) glm::vec3 direction;
-    alignas(16) glm::vec3 color;
-    float illuminance;
-};
-
-struct Vertex {
+struct VertexData {
     glm::vec3 position;
     glm::vec3 normal;
     glm::vec4 tangent;
     glm::vec2 tex_coords;
-
-    static void get_attributes(
-        std::vector<vk::VertexInputAttributeDescription>& attributes,
-        uint32_t binding,
-        uint32_t first_location
-    ) {
-        attributes.push_back(
-            vk::VertexInputAttributeDescription()
-                .setLocation(first_location)
-                .setBinding(binding)
-                .setFormat(vk::Format::eR32G32B32Sfloat)
-                .setOffset(0)
-        );
-        attributes.push_back(
-            vk::VertexInputAttributeDescription()
-                .setLocation(first_location + 1)
-                .setBinding(binding)
-                .setFormat(vk::Format::eR32G32B32Sfloat)
-                .setOffset(3 * sizeof(float))
-        );
-        attributes.push_back(
-            vk::VertexInputAttributeDescription()
-                .setLocation(first_location + 2)
-                .setBinding(binding)
-                .setFormat(vk::Format::eR32G32B32A32Sfloat)
-                .setOffset(6 * sizeof(float))
-        );
-        attributes.push_back(
-            vk::VertexInputAttributeDescription()
-                .setLocation(first_location + 3)
-                .setBinding(binding)
-                .setFormat(vk::Format::eR32G32Sfloat)
-                .setOffset(10 * sizeof(float))
-        );
-    }
 };
 
-static std::optional<std::vector<Vertex>> interlace_mesh_attributes(const Mesh& mesh) {
+static std::optional<std::vector<VertexData>> interlace_mesh_attributes(const Mesh& mesh) {
     if (mesh.positions.size() != mesh.normals.size()
         || mesh.positions.size() != mesh.tex_coords.size()
         || mesh.positions.size() != mesh.tangents.size())
@@ -102,7 +57,7 @@ static std::optional<std::vector<Vertex>> interlace_mesh_attributes(const Mesh& 
         return std::nullopt;
     }
 
-    std::vector<Vertex> vertices;
+    std::vector<VertexData> vertices;
     vertices.reserve(mesh.positions.size());
     for (size_t i = 0; i < mesh.positions.size(); i++) {
         vertices.push_back({
@@ -116,11 +71,11 @@ static std::optional<std::vector<Vertex>> interlace_mesh_attributes(const Mesh& 
     return vertices;
 }
 
-struct Instance {
+struct InstanceData {
     glm::mat4x3 local_to_world;
     uint32_t material_index;
 
-    Instance(
+    InstanceData(
         uint32_t material_index,
         glm::vec3 translation, 
         glm::quat rotation = glm::identity<glm::quat>(), 
@@ -130,47 +85,44 @@ struct Instance {
         this->local_to_world = glm::mat4x3(scale * glm::mat3_cast(rotation));
         this->local_to_world[3] = translation;
     }
-
-    static void get_attributes(
-        std::vector<vk::VertexInputAttributeDescription>& attributes,
-        uint32_t binding,
-        uint32_t first_location
-    ) {
-        for (uint32_t i = 0; i < 4; i++) {
-            attributes.push_back(
-                vk::VertexInputAttributeDescription()
-                    .setLocation(first_location + i)
-                    .setBinding(binding)
-                    .setFormat(vk::Format::eR32G32B32Sfloat)
-                    .setOffset(3 * sizeof(float) * static_cast<size_t>(i))
-            );
-        }
-        attributes.push_back(
-            vk::VertexInputAttributeDescription()
-                .setLocation(first_location + 4)
-                .setBinding(binding)
-                .setFormat(vk::Format::eR32Uint)
-                .setOffset(12 * sizeof(float))
-        );
-    }
 };
 
-struct DrawConstants {
-    vk::DeviceAddress instances;
-    vk::DeviceAddress vertices;
-    vk::DeviceAddress materials;
+
+struct AmbientLightData {
+    glm::vec3 color;
+    float illuminance;
 };
 
-struct ViewUniforms {
-    glm::mat4 world_to_clip;
+struct PointLightData {
+    alignas(16) glm::vec3 position;
+    float radius;
+    alignas(16) glm::vec3 color;
+    float intensity;
 };
 
-struct LightUniforms {
-    alignas(16) glm::vec3 view_position;
+struct DirectionalLightData {
+    alignas(16) glm::vec3 direction;
+    alignas(16) glm::vec3 color;
+    float illuminance;
+};
+
+struct ViewData {
+    alignas(16) glm::mat4 world_to_clip;
+    alignas(16) glm::vec3 position;
+};
+
+struct LightData {
     alignas(16) glm::vec3 ambient_color;
     float ambient_illuminance;
     uint32_t point_count;
     uint32_t directional_count;
+};
+
+struct FrameData {
+    FrameSubBuffer view_data;
+    FrameSubBuffer light_data;
+    FrameSubBuffer dir_lights;
+    FrameSubBuffer point_lights;
 };
 
 static inline std::vector<uint32_t> read_spirv_file(const std::filesystem::path& path) {
@@ -191,6 +143,7 @@ static inline std::vector<uint32_t> read_spirv_file(const std::filesystem::path&
         return {};
     }
 };
+
 
 struct Renderer::Inner {
     static constexpr uint32_t FRAMES_IN_FLIGHT = 2;
@@ -226,10 +179,15 @@ struct Renderer::Inner {
             FRAMES_IN_FLIGHT,
             MAX_MATERIALS
         );
+        this->frame_arena = FrameArena(
+            this->device,
+            this->allocator,
+            vk::BufferUsageFlagBits::eStorageBuffer,
+            FRAMES_IN_FLIGHT,
+            FRAME_ARENA_CAPACITY_PER_FIF
+        );
         this->allocate_command_buffers(); 
         this->create_buffers();
-        this->create_descriptor_pool();
-        this->create_descriptor_sets();
         this->create_pipeline(read_spirv_file("bin/shaders/shader.spv"));
     }
 
@@ -237,17 +195,14 @@ struct Renderer::Inner {
         vk_expect(this->device.waitIdle(), "Wait for device failed");
         this->device.destroyPipeline(this->pipeline);
         this->device.destroyPipelineLayout(this->pipeline_layout);
-        this->device.destroyDescriptorSetLayout(this->frame_set_layout);
-        //this->device.destroyDescriptorSetLayout(this->image_set_layout);
-        this->device.destroyDescriptorPool(this->descriptor_pool);
         this->device.freeCommandBuffers(this->command_pool, this->command_buffers);
         this->device.destroyCommandPool(this->command_pool);
         this->destroy_sync_primitives();
         this->destroy_depth_textures();
         this->destroy_buffers();
+        this->frame_arena.destroy();
         this->texture_manager.destroy();
         this->material_manager.destroy();
-        //this->destroy_images();
         this->allocator.destroy();
         this->swapchain.destroy(this->device);
         this->device.destroy();
@@ -336,12 +291,43 @@ struct Renderer::Inner {
         this->material_manager.flag_dirty_materials(this->texture_manager);
         this->material_manager.update_dirty(this->texture_manager, this->frame_index);
         this->texture_manager.clear_updated();
+        this->frame_arena.reset();
 
-        this->update_lights();
-        this->set_mapped_uniforms();
+        vk::Extent2D viewport_size = this->swapchain.get_extent();
+        auto viewport_width = static_cast<float>(viewport_size.width);
+        auto viewport_height = static_cast<float>(viewport_size.height);
+
+        FrameSubBuffer view_data = this->frame_arena
+            .add(ViewData{
+                .world_to_clip = this->camera.world_to_clip(viewport_width, viewport_height),
+                .position = this->camera.transform.translation,
+            })
+            .value();
+
+        FrameSubBuffer light_data = this->frame_arena
+            .add(LightData {
+                .ambient_color = this->ambient_light.color,
+                .ambient_illuminance = this->ambient_light.illuminance,
+                .point_count = static_cast<uint32_t>(this->point_lights.size()),
+                .directional_count = static_cast<uint32_t>(this->directional_lights.size()),
+            })
+            .value();
+
+        FrameSubBuffer dir_lights = this->frame_arena
+            .add_array(std::span(this->directional_lights))
+            .value();
+
+        FrameSubBuffer point_lights = this->frame_arena
+            .add_array(std::span(this->point_lights))
+            .value();
 
         vk::CommandBuffer command_buffer = this->begin_frame_commands();
-        this->record_frame_commands(command_buffer, image);
+        this->record_frame_commands(command_buffer, image, FrameData{
+            .view_data = view_data,
+            .light_data = light_data,
+            .dir_lights = dir_lights,
+            .point_lights = point_lights
+        });
         this->submit_frame_commands(command_buffer, image);
 
         vk::Result result2 = this->swapchain.present(this->queue, image);
@@ -573,26 +559,7 @@ private:
                 .setPName("fragmentMain"),
         };
 
-        /*
-        std::array bindings = {
-            
-            vk::VertexInputBindingDescription()
-                .setBinding(0)
-                .setStride(sizeof(Vertex))
-                .setInputRate(vk::VertexInputRate::eVertex),
-            vk::VertexInputBindingDescription()
-                .setBinding(0)
-                .setStride(sizeof(Instance))
-                .setInputRate(vk::VertexInputRate::eInstance)
-        };
-
-        std::vector<vk::VertexInputAttributeDescription> attributes;
-        //Vertex::get_attributes(attributes, 0, 0);
-        Instance::get_attributes(attributes, 0, 0);*/
-
         auto vertex_state = vk::PipelineVertexInputStateCreateInfo();
-            //.setVertexBindingDescriptions(bindings)
-            //.setVertexAttributeDescriptions(attributes);
 
         auto raster_state = vk::PipelineRasterizationStateCreateInfo()
             .setPolygonMode(vk::PolygonMode::eFill)
@@ -638,7 +605,7 @@ private:
         auto dyn_state = vk::PipelineDynamicStateCreateInfo().setDynamicStates(dynamic_states);
 
         std::array set_layouts = {
-            this->frame_set_layout,
+            //this->frame_set_layout,
             this->texture_manager.descriptor_set_layout(),
         };
         std::array push_constant_ranges = {
@@ -719,7 +686,7 @@ private:
     }
 
     void create_mesh_buffers(const Mesh& mesh) {
-        std::vector<Vertex> vertices;
+        std::vector<VertexData> vertices;
         if (auto mesh_vertices = interlace_mesh_attributes(mesh); mesh_vertices != std::nullopt) {
             vertices = std::move(*mesh_vertices);
         } else {
@@ -727,7 +694,7 @@ private:
         }
 
         vk::DeviceSize vertices_offset = this->current_buffer_offset;
-        vk::DeviceSize vertices_size = vertices.size() * sizeof(Vertex);
+        vk::DeviceSize vertices_size = vertices.size() * sizeof(VertexData);
         this->current_buffer_offset += vertices_size;
 
         vk::DeviceSize indices_offset = vertices_size;
@@ -775,7 +742,7 @@ private:
         const int columns = 32;
         const float spacing = 2.0f;
 
-        std::vector<Instance> instances;
+        std::vector<InstanceData> instances;
 
         for (int layer = 0; layer < layers; layer++) {
             for (int row = 0; row < rows; row++) {
@@ -805,195 +772,36 @@ private:
             this->allocator,
             vk::BufferUsageFlagBits::eStorageBuffer 
                 | vk::BufferUsageFlagBits::eTransferDst,
-            instances.size() * sizeof(Instance)
+            instances.size() * sizeof(InstanceData)
         );
 
-        memcpy(instance_buffer.mapped, instances.data(), instances.size() * sizeof(Instance));
-
-        DynOffsetBuffer view_uniform_buffer = this->create_dyn_offset_buffer<ViewUniforms>(
-            vk::BufferUsageFlagBits::eUniformBuffer, 1
-        );
-        DynOffsetBuffer light_uniform_buffer = this->create_dyn_offset_buffer<LightUniforms>(
-            vk::BufferUsageFlagBits::eUniformBuffer, 1
-        );
-        DynOffsetBuffer dir_light_buffer = this->create_dyn_offset_buffer<DirectionalLight>(
-            vk::BufferUsageFlagBits::eStorageBuffer, 
-            MAX_DIRECTIONAL_LIGHTS
-        );
-        DynOffsetBuffer point_light_buffer = this->create_dyn_offset_buffer<PointLight>(
-            vk::BufferUsageFlagBits::eStorageBuffer, 
-            MAX_POINT_LIGHTS
-        );
+        memcpy(instance_buffer.mapped, instances.data(), instances.size() * sizeof(InstanceData));
 
         this->static_buffer = static_buffer;
         this->current_buffer_offset = 0;
         this->instance_count = uint32_t(instances.size());
         this->instance_buffer = instance_buffer;
-        this->view_uniform_buffer = view_uniform_buffer;
-        this->light_uniform_buffer = light_uniform_buffer;
-        this->dir_light_buffer = dir_light_buffer;
-        this->point_light_buffer = point_light_buffer;
     }
 
     void destroy_buffers() {
-        this->dir_light_buffer.destroy(this->allocator);
-        this->point_light_buffer.destroy(this->allocator);
         this->instance_buffer.destroy(this->allocator);
         this->static_buffer.destroy(this->allocator);
-        this->view_uniform_buffer.destroy(this->allocator);
-        this->light_uniform_buffer.destroy(this->allocator);
     }
 
     Texture create_image(const vk::ImageCreateInfo& info) {
         return ::create_texture(this->device, this->allocator, info);
     }
 
-    template<typename T>
-    DynOffsetBuffer<T> create_dyn_offset_buffer(
-        vk::BufferUsageFlags usage, 
-        vk::DeviceSize length,
-        vk::DeviceSize count = FRAMES_IN_FLIGHT     
+    void record_frame_commands(
+        vk::CommandBuffer command_buffer, 
+        const SwapchainImage& image,
+        const FrameData& data
     ) {
-        return ::create_dyn_offset_buffer<T>(this->device, this->allocator, usage, length, count);
-    }
-
-    void create_descriptor_pool() {
-        std::array pool_sizes = {
-            vk::DescriptorPoolSize()
-                .setType(vk::DescriptorType::eUniformBufferDynamic)
-                .setDescriptorCount(2),
-            vk::DescriptorPoolSize()
-                .setType(vk::DescriptorType::eStorageBufferDynamic)
-                .setDescriptorCount(3),
-            vk::DescriptorPoolSize()
-                .setType(vk::DescriptorType::eSampler)
-                .setDescriptorCount(MAX_SAMPLERS),
-            vk::DescriptorPoolSize()
-                .setType(vk::DescriptorType::eSampledImage)
-                .setDescriptorCount(MAX_TEXTURES),
-        };
-        auto [result, descriptor_pool] = this->device.createDescriptorPool(
-            vk::DescriptorPoolCreateInfo()
-                .setMaxSets(3)
-                .setPoolSizes(pool_sizes)
-        );
-        vk_expect(result, "Failed to create descriptor pool");
-        this->descriptor_pool = descriptor_pool;
-    }
-
-    void create_descriptor_sets() {
-        this->create_frame_set();
-        //this->create_image_set();
-        //this->create_material_set();
-    }
-
-    void create_frame_set() {
-        std::array bindings = {
-            vk::DescriptorSetLayoutBinding()
-                .setBinding(0)
-                .setDescriptorType(vk::DescriptorType::eUniformBufferDynamic)
-                .setDescriptorCount(1)
-                .setStageFlags(vk::ShaderStageFlagBits::eVertex),
-            vk::DescriptorSetLayoutBinding()
-                .setBinding(1)
-                .setDescriptorType(vk::DescriptorType::eUniformBufferDynamic)
-                .setDescriptorCount(1)
-                .setStageFlags(vk::ShaderStageFlagBits::eFragment),
-            vk::DescriptorSetLayoutBinding()
-                .setBinding(2)
-                .setDescriptorType(vk::DescriptorType::eStorageBufferDynamic)
-                .setDescriptorCount(1)
-                .setStageFlags(vk::ShaderStageFlagBits::eFragment),
-            vk::DescriptorSetLayoutBinding()
-                .setBinding(3)
-                .setDescriptorType(vk::DescriptorType::eStorageBufferDynamic)
-                .setDescriptorCount(1)
-                .setStageFlags(vk::ShaderStageFlagBits::eFragment),
-        };
-        auto [result1, layout] = this->device.createDescriptorSetLayout(
-            vk::DescriptorSetLayoutCreateInfo().setBindings(bindings)
-        );
-        vk_expect(result1, "Failed to create descriptor set layout");
-
-        auto [result2, sets] = this->device.allocateDescriptorSets(
-            vk::DescriptorSetAllocateInfo()
-                .setDescriptorPool(this->descriptor_pool)
-                .setSetLayouts(layout)
-        );
-        vk_expect(result2, "Failed to create descriptor set layout");
-
-        std::vector<vk::WriteDescriptorSet> writes;
-        
-        auto view_uniforms_info = this->view_uniform_buffer.descriptor_info();
-        writes.push_back(
-            vk::WriteDescriptorSet()
-                .setDstSet(sets[0])
-                .setDstBinding(0)
-                .setDstArrayElement(0)
-                .setDescriptorType(vk::DescriptorType::eUniformBufferDynamic)
-                .setBufferInfo(view_uniforms_info)
-        );
-
-        auto light_uniforms_info = this->light_uniform_buffer.descriptor_info();
-        writes.push_back(
-            vk::WriteDescriptorSet()
-                .setDstSet(sets[0])
-                .setDstBinding(1)
-                .setDstArrayElement(0)
-                .setDescriptorType(vk::DescriptorType::eUniformBufferDynamic)
-                .setBufferInfo(light_uniforms_info)
-        );
-
-        auto dir_lights_info = this->dir_light_buffer.descriptor_info();
-        writes.push_back(
-            vk::WriteDescriptorSet()
-                .setDstSet(sets[0])
-                .setDstBinding(2)
-                .setDstArrayElement(0)
-                .setDescriptorType(vk::DescriptorType::eStorageBufferDynamic)
-                .setBufferInfo(dir_lights_info)
-        );
-
-        auto point_lights_info = this->point_light_buffer.descriptor_info();
-        writes.push_back(
-            vk::WriteDescriptorSet()
-                .setDstSet(sets[0])
-                .setDstBinding(3)
-                .setDstArrayElement(0)
-                .setDescriptorType(vk::DescriptorType::eStorageBufferDynamic)
-                .setBufferInfo(point_lights_info)
-        );
-        
-        this->device.updateDescriptorSets(writes, {});
-
-        this->frame_set = sets[0];
-        this->frame_set_layout = layout;
-    }
-
-    void set_mapped_uniforms() {
-        vk::Extent2D viewport_size = this->swapchain.get_extent();
-        auto viewport_width = static_cast<float>(viewport_size.width);
-        auto viewport_height = static_cast<float>(viewport_size.height);
-
-        this->view_uniform_buffer.write_one(this->frame_index, ViewUniforms{
-            .world_to_clip = this->camera.world_to_clip(viewport_width, viewport_height),
-        });
-        this->light_uniform_buffer.write_one(this->frame_index, LightUniforms {
-            .view_position = this->camera.transform.translation,
-            .ambient_color = this->ambient_light.color,
-            .ambient_illuminance = this->ambient_light.illuminance,
-            .point_count = static_cast<uint32_t>(this->point_lights.size()),
-            .directional_count = static_cast<uint32_t>(this->directional_lights.size()),
-        });
-    }
-
-    void update_lights() {
-        this->dir_light_buffer.write_one(this->frame_index, this->directional_lights);
-        this->point_light_buffer.write_one(this->frame_index, this->point_lights);
-    }
-
-    void record_frame_commands(vk::CommandBuffer command_buffer, const SwapchainImage& image) {
         DrawConstants draw_constants = {
+            .view_data = data.view_data.base_address,
+            .light_data = data.light_data.base_address,
+            .point_lights = data.point_lights.base_address,
+            .directional_lights = data.dir_lights.base_address,
             .instances = this->instance_buffer.address,
             .vertices = this->static_buffer.address + this->vertices_offset,
             .materials = this->material_manager.buffer_address(this->frame_index)
@@ -1094,16 +902,7 @@ private:
         command_buffer.bindDescriptorSets(
             vk::PipelineBindPoint::eGraphics,
             this->pipeline_layout, 0,
-            {
-                this->frame_set, 
-                this->texture_manager.descriptor_set(), 
-            },
-            {
-                this->view_uniform_buffer.offset(this->frame_index),
-                this->light_uniform_buffer.offset(this->frame_index),
-                this->dir_light_buffer.offset(this->frame_index),
-                this->point_light_buffer.offset(this->frame_index),
-            }
+            {this->texture_manager.descriptor_set()}, {}
         );
         command_buffer.bindIndexBuffer(this->static_buffer, this->indices_offset, vk::IndexType::eUint32);
         command_buffer.drawIndexed(
@@ -1221,15 +1020,6 @@ private:
     vk::Pipeline pipeline;
     vk::PipelineLayout pipeline_layout;
 
-    vk::DescriptorPool descriptor_pool;
-    vk::DescriptorSetLayout frame_set_layout;
-    vk::DescriptorSet frame_set;
-
-    DynOffsetBuffer<ViewUniforms> view_uniform_buffer;
-    DynOffsetBuffer<LightUniforms> light_uniform_buffer;
-    DynOffsetBuffer<DirectionalLight> dir_light_buffer;
-    DynOffsetBuffer<PointLight> point_light_buffer;
-
     Buffer instance_buffer;
     uint32_t instance_count;
 
@@ -1243,25 +1033,26 @@ private:
     vk::DeviceAddress indices_size;
     uint32_t index_count;
     
+    FrameArena frame_arena;
     TextureManager texture_manager;
     MaterialManager material_manager;
     MaterialId material;
 
     Camera camera;
-    AmbientLight ambient_light = {
+    AmbientLightData ambient_light = {
         .color = glm::vec3(1.0f, 1.0f, 1.0f),
         .illuminance = 0.5f
     };
-    std::vector<PointLight> point_lights = {
-        PointLight { 
+    std::vector<PointLightData> point_lights = {
+        PointLightData { 
             .position = glm::vec3(0.0f, -1.0f, 0.0f),
             .radius = 100.0f,
             .color = glm::vec3(1.0f, 1.0f, 1.0f),
             .intensity = 600.0f
         }
     };
-    std::vector<DirectionalLight> directional_lights = {
-        DirectionalLight { 
+    std::vector<DirectionalLightData> directional_lights = {
+        DirectionalLightData { 
             .direction = glm::vec3(0.3f, 1.5f, 0.6f),
             .color = glm::vec3(1.0f, 1.0f, 1.0f),
             .illuminance = 4.0f

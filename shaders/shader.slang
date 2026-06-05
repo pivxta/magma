@@ -34,6 +34,10 @@ struct Instance {
 }
 
 struct DrawConstants {
+    ImmutablePtr<ViewUniforms> view;
+    ImmutablePtr<LightUniforms> light;
+    ImmutablePtr<PointLight> point_lights;
+    ImmutablePtr<DirectionalLight> directional_lights;
     ImmutablePtr<Instance> instances;
     ImmutablePtr<Vertex> vertices;
     ImmutablePtr<Material> materials;
@@ -53,10 +57,8 @@ struct VertexOutput {
 
 struct ViewUniforms {
     float4x4 world_to_clip;
+    float3 position;
 }
-
-[[vk::binding(0, 0)]]
-ConstantBuffer<ViewUniforms> view;
 
 [shader("vertex")]
 VertexOutput vertexMain(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
@@ -67,7 +69,7 @@ VertexOutput vertexMain(uint vertex_id: SV_VertexID, uint instance_id: SV_Instan
     float3 world_tangent = instance.transform_vector(vertex.tangent.xyz);
     
     VertexOutput output;
-    output.sv_position = mul(view.world_to_clip, float4(world_position, 1.0));
+    output.sv_position = mul(constants.view.world_to_clip, float4(world_position, 1.0));
     output.position = world_position;
     output.normal = world_normal;
     output.tangent = world_tangent;
@@ -349,34 +351,21 @@ struct Material {
 };
 
 struct LightUniforms {
-    float3 view_position;
     float3 ambient_color;
     float ambient_illuminance;
     uint point_count;
     uint directional_count;
 };
 
-[[vk::binding(1, 0)]]
-ConstantBuffer<LightUniforms> light;
-[[vk::binding(2, 0)]]
-StructuredBuffer<DirectionalLight> directional_lights;
-[[vk::binding(3, 0)]]
-StructuredBuffer<PointLight> point_lights;
-
-[[vk::binding(0, 1)]]
+[[vk::binding(0, 0)]]
 Texture2D[] textures;
-[[vk::binding(1, 1)]]
+[[vk::binding(1, 0)]]
 SamplerState[] samplers;
-/*
-[[vk::binding(0, 2)]]
-StructuredBuffer<Material> materials;
-*/
-
 
 [shader("fragment")]
 float4 fragmentMain(FragmentInput input) : SV_Target {
     let props = constants.materials[input.material_index].get_fragment_properties(
-        light.view_position,
+        constants.view.position,
         input.position,
         input.normal,
         input.tangent,
@@ -385,24 +374,24 @@ float4 fragmentMain(FragmentInput input) : SV_Target {
     );
     var color = props.fragment.base_color 
         * props.fragment.ambient_occlusion
-        * light.ambient_color 
-        * light.ambient_illuminance;
+        * constants.light.ambient_color 
+        * constants.light.ambient_illuminance;
     
-    for (uint i = 0; i < light.directional_count; i++) {
+    for (uint i = 0; i < constants.light.directional_count; i++) {
         color += calculate_radiance(
-            directional_lights[i], 
+            constants.directional_lights[i], 
             props.brdf,
             props.fragment,
-            light.view_position
+            constants.view.position
         );
     }
     
-    for (uint i = 0; i < light.point_count; i++) {
+    for (uint i = 0; i < constants.light.point_count; i++) {
         color += calculate_radiance(
-            point_lights[i], 
+            constants.point_lights[i], 
             props.brdf,
             props.fragment,
-            light.view_position
+            constants.view.position
         );
     }
 

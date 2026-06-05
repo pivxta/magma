@@ -14,6 +14,7 @@ class Arena {
 public:
     static_assert(std::is_unsigned_v<T>, "Arena requires an unsigned integer type");
 
+    Arena() = default;
     Arena(T capacity) {
         this->capacity = capacity;
     }
@@ -50,5 +51,5 @@ private:
     }
 
     T offset = 0;
-    T capacity;
+    T capacity = 0;
 };
