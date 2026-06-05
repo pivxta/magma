@@ -61,91 +61,24 @@ static MaterialData get_material_data(const Material& material, const TextureMan
     };
 }
 
-/*
-static vk::DescriptorPool create_descriptor_pool(vk::Device device, uint32_t frames_in_flight) {
-    std::array pool_sizes = {
-        vk::DescriptorPoolSize()
-            .setType(vk::DescriptorType::eStorageBuffer)
-            .setDescriptorCount(frames_in_flight),
-    };
-    auto [result, descriptor_pool] = device.createDescriptorPool(
-        vk::DescriptorPoolCreateInfo()
-            .setMaxSets(frames_in_flight)
-            .setPoolSizes(pool_sizes)
-    );
-    vk_expect(result, "Failed to create descriptor pool");
-    return descriptor_pool;
-}
-
-static vk::DescriptorSetLayout create_set_layout(vk::Device device) {
-    std::array bindings = {
-        vk::DescriptorSetLayoutBinding()
-            .setBinding(0)
-            .setDescriptorType(vk::DescriptorType::eStorageBuffer)
-            .setDescriptorCount(1)
-            .setStageFlags(vk::ShaderStageFlagBits::eFragment),
-    };
-    auto [result1, layout] = device.createDescriptorSetLayout(
-        vk::DescriptorSetLayoutCreateInfo().setBindings(bindings)
-    );
-    vk_expect(result1, "Failed to create descriptor set layout");
-    return layout;
-}*/
-
-template<typename T>
-static std::vector<vk::DescriptorSet> create_sets(
-    vk::Device device,
-    vk::DescriptorPool pool,
-    vk::DescriptorSetLayout layout,
-    const std::vector<Buffer<T>>& buffers
-) {
-    std::vector<vk::DescriptorSetLayout> layouts;
-    layouts.resize(buffers.size(), layout);
-    
-    auto [result2, sets] = device.allocateDescriptorSets(
-        vk::DescriptorSetAllocateInfo()
-            .setDescriptorSetCount(static_cast<uint32_t>(buffers.size()))
-            .setDescriptorPool(pool)
-            .setSetLayouts(layouts)
-    );
-    vk_expect(result2, "Failed to create descriptor set layout");
-
-    std::vector<vk::WriteDescriptorSet> writes;
-    for (uint32_t index = 0; index < sets.size(); index++) {
-        vk::DescriptorBufferInfo info = buffers[index].descriptor_info();
-        writes.push_back(
-            vk::WriteDescriptorSet()
-                .setDstSet(sets[index])
-                .setDstBinding(0)
-                .setDstArrayElement(0)
-                .setDescriptorType(vk::DescriptorType::eStorageBuffer)
-                .setBufferInfo(info)
-        );
-    }
-    device.updateDescriptorSets(writes, {});
-
-    return sets;
-}
-
-template<typename T>
-static std::vector<Buffer<T>> create_buffers(
+static std::vector<Buffer> create_buffers(
     vk::Device device,
     vma::Allocator allocator,
     uint32_t frames_in_flight,
     uint32_t max_materials
 ) {
-    std::vector<Buffer<T>> buffers;
+    std::vector<Buffer> buffers;
     buffers.reserve(frames_in_flight);
     for (uint32_t i = 0; i < frames_in_flight; i++) {
-        buffers.push_back(create_mapped_buffer_bda<T>(
+        buffers.push_back(create_mapped_buffer(
             device,
             allocator, 
             vk::BufferUsageFlagBits::eStorageBuffer 
                 | vk::BufferUsageFlagBits::eShaderDeviceAddress,
-            max_materials
+            max_materials * sizeof(MaterialData)
         ));
     }
-    return std::move(buffers);
+    return buffers;
 }
 
 MaterialManager::MaterialManager(
@@ -159,25 +92,16 @@ MaterialManager::MaterialManager(
     dirty(frames_in_flight),
     materials(max_materials)
 {
-    /*
-    this->desc_pool = create_descriptor_pool(device, frames_in_flight);
-    this->desc_set_layout = create_set_layout(device);
-    */
-    this->buffers = create_buffers<MaterialData>(
+    this->buffers = create_buffers(
         device, 
         allocator, 
         frames_in_flight, 
         max_materials
     );
-    //this->desc_sets = create_sets(device, this->desc_pool, this->desc_set_layout, this->buffers);
     this->fallback = this->add(Material {});
 }
 
 void MaterialManager::destroy() {
-    /*
-    this->device.destroyDescriptorSetLayout(this->desc_set_layout);
-    this->device.destroyDescriptorPool(this->desc_pool);
-    */
     for (auto& buffer: this->buffers) {
         buffer.destroy(this->allocator);
     }
@@ -214,12 +138,14 @@ void MaterialManager::update_dirty(const TextureManager& texture_manager, uint32
         return;
     }
 
-    vk::DeviceSize write_start = this->buffers[frame_index].length;
+    vk::DeviceSize write_start = this->buffers[frame_index].size;
     vk::DeviceSize write_end = 0;
-    MaterialData* mapped_data = this->buffers[frame_index].get_mapped();
+    auto mapped_data = reinterpret_cast<MaterialData*>(this->buffers[frame_index].mapped);
     for (auto key: this->dirty[frame_index]) {
-        write_start = std::min(write_start, static_cast<vk::DeviceSize>(key.index));
-        write_end = std::max(write_end, static_cast<vk::DeviceSize>(key.index) + 1);
+        auto entry_offset = static_cast<vk::DeviceSize>(key.index) * sizeof(MaterialData);
+        auto entry_size = static_cast<vk::DeviceSize>(sizeof(MaterialData));
+        write_start = std::min(write_start, entry_offset);
+        write_end = std::max(write_end, entry_offset + entry_size);
 
         if (auto material = this->materials.get(key); material != nullptr) {
             mapped_data[key.index] = get_material_data(*material, texture_manager);

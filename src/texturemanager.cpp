@@ -276,7 +276,7 @@ void record_image_barrier(vk::CommandBuffer command_buffer, vk::ImageMemoryBarri
 void record_buffer_to_image_copy(
     vk::CommandBuffer command_buffer, 
     const Texture& texture, 
-    const Buffer<uint8_t>& staging
+    const Buffer& staging
 ) {
     record_image_barrier(
         command_buffer,
@@ -299,7 +299,7 @@ void record_buffer_to_image_copy(
     );
     
     command_buffer.copyBufferToImage(
-        staging, 
+        staging,
         texture, 
         vk::ImageLayout::eTransferDstOptimal,
         {
@@ -486,9 +486,13 @@ static Texture upload_into_texture(
             .setTiling(vk::ImageTiling::eOptimal)
     );
 
-    auto staging = create_mapped_buffer_init<uint8_t>(
-        allocator, vk::BufferUsageFlagBits::eTransferSrc, src.bytes
+    auto staging = create_staging_buffer(
+        device, 
+        allocator, 
+        vk::BufferUsageFlagBits::eTransferSrc,
+        src.bytes.size()
     );
+    memcpy(staging.mapped, src.bytes.data(), src.bytes.size());
     vk::CommandBuffer command_buffer = begin_one_shot_commands(device, command_pool);
     record_buffer_to_image_copy(command_buffer, texture, staging);
     record_image_mip_generation(command_buffer, texture);

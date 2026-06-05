@@ -5,7 +5,7 @@
 #include <span>
 #include "vkerror.h"
 
-struct UntypedBuffer {
+struct Buffer {
     vk::Buffer buffer;
     vma::Allocation allocation;
     vk::DeviceSize size;
@@ -21,64 +21,29 @@ struct UntypedBuffer {
         this->mapped = nullptr;
     }
 
+    void flush(
+        vma::Allocator allocator,
+        vk::DeviceSize offset = 0,
+        std::optional<vk::DeviceSize> size = std::nullopt
+    ) {
+        vk_expect(allocator.flushAllocation(
+            this->allocation, 
+            offset, size.value_or(this->size)
+        ), "Failed to flush buffer allocation");
+    }
+
+    operator vk::Buffer() const {
+        return this->buffer;
+    }
+
     operator vk::Buffer() {
         return this->buffer;
     }
 };
 
 template<typename T>
-struct Buffer {
-    UntypedBuffer buffer;
-    vk::DeviceSize length;
-
-    operator vk::Buffer() const {
-        return this->buffer.buffer;
-    }
-
-    vk::DeviceSize size_bytes() const {
-        return this->buffer.size;
-    }
-
-    vk::DeviceAddress get_device_address() const {
-        return this->buffer.address;
-    }
-
-    T* get_mapped() {
-        return reinterpret_cast<T*>(this->buffer.mapped);
-    }
-    
-    void flush(
-        vma::Allocator allocator,
-        vk::DeviceSize offset = 0,
-        std::optional<vk::DeviceSize> elems = std::nullopt
-    ) {
-        vk::DeviceSize length = elems.value_or(this->length);
-        vk_expect(allocator.flushAllocation(
-            this->buffer.allocation, 
-            offset, length * sizeof(T)
-        ), "Failed to flush buffer allocation");
-    }
-
-    void destroy(vma::Allocator allocator) {
-        this->buffer.destroy(allocator);
-        this->length = 0;
-    }
-    
-    vk::DescriptorBufferInfo descriptor_info(
-        vk::DeviceSize offset = 0,
-        std::optional<vk::DeviceSize> elems = std::nullopt
-    ) const {
-        vk::DeviceSize length = elems.value_or(this->length);
-        return vk::DescriptorBufferInfo()
-            .setBuffer(*this)
-            .setOffset(offset)
-            .setRange(sizeof(T) * length);
-    }
-};
-
-template<typename T>
 struct DynOffsetBuffer {
-    UntypedBuffer buffer;
+    Buffer buffer;
     vk::DeviceSize length;
     vk::DeviceSize count;
     uint32_t stride;
@@ -142,71 +107,81 @@ struct DynOffsetBuffer {
     }
 };
 
-static UntypedBuffer create_untyped_buffer(
-    vma::Allocator allocator,
-    const vk::BufferCreateInfo& buffer_info,
-    const vma::AllocationCreateInfo& alloc_info
-) {
-    vma::AllocationInfo info;
-    auto [result, resources] = allocator.createBuffer(buffer_info, alloc_info, &info);
-    vk_expect(result, "Failed to create buffer");
-
-    return {
-        .buffer = resources.second,
-        .allocation = resources.first,
-        .size = buffer_info.size,
-        .address = 0,
-        .mapped = info.pMappedData
-    };
-}
-
-static UntypedBuffer create_untyped_buffer_bda(
+static Buffer create_buffer(
     vk::Device device,
     vma::Allocator allocator,
     vk::BufferCreateInfo buffer_info,
     const vma::AllocationCreateInfo& alloc_info
 ) {
-    buffer_info.usage |= vk::BufferUsageFlagBits::eShaderDeviceAddress;
-
     vma::AllocationInfo info;
     auto [result, resources] = allocator.createBuffer(buffer_info, alloc_info, &info);
     vk_expect(result, "Failed to create buffer");
 
-    auto address_info = vk::BufferDeviceAddressInfo().setBuffer(resources.second);
-    auto address = device.getBufferAddress(address_info);
+    vk::Buffer buffer = resources.second;
+    vma::Allocation allocation = resources.first;
+    vk::DeviceAddress address = 0;
+    if (buffer_info.usage & vk::BufferUsageFlagBits::eShaderDeviceAddress) {
+        address = device.getBufferAddress(vk::BufferDeviceAddressInfo().setBuffer(buffer));
+    }
+
     return {
-        .buffer = resources.second,
-        .allocation = resources.first,
+        .buffer = buffer,
+        .allocation = allocation,
         .size = buffer_info.size,
         .address = address,
         .mapped = info.pMappedData
     };
 }
 
-static inline UntypedBuffer create_gpu_untyped_buffer_bda(
+static inline Buffer create_gpu_buffer(
     vk::Device device,
     vma::Allocator allocator,
     vk::BufferUsageFlags usage, 
     vk::DeviceSize size
 ) {
-    return create_untyped_buffer_bda(
+    return create_buffer(
         device,
         allocator,
         vk::BufferCreateInfo()
             .setSharingMode(vk::SharingMode::eExclusive)
             .setSize(size)
-            .setUsage(usage),
+            .setUsage(usage | vk::BufferUsageFlagBits::eShaderDeviceAddress),
         vma::AllocationCreateInfo()
             .setUsage(vma::MemoryUsage::eGpuOnly)
     );
 }
 
-static inline UntypedBuffer create_mapped_untyped_buffer(
+static inline Buffer create_mapped_buffer(
+    vk::Device device,
     vma::Allocator allocator,
     vk::BufferUsageFlags usage, 
     vk::DeviceSize size
 ) {
-    return create_untyped_buffer(
+    return create_buffer(
+        device,
+        allocator,
+        vk::BufferCreateInfo()
+            .setSharingMode(vk::SharingMode::eExclusive)
+            .setSize(size)
+            .setUsage(usage | vk::BufferUsageFlagBits::eShaderDeviceAddress),
+        vma::AllocationCreateInfo()
+            .setFlags(
+                vma::AllocationCreateFlagBits::eHostAccessSequentialWrite
+                    | vma::AllocationCreateFlagBits::eMapped
+            )
+            .setUsage(vma::MemoryUsage::eAuto)
+    );
+}
+
+
+static inline Buffer create_staging_buffer(
+    vk::Device device,
+    vma::Allocator allocator,
+    vk::BufferUsageFlags usage, 
+    vk::DeviceSize size
+) {
+    return create_buffer(
+        device,
         allocator,
         vk::BufferCreateInfo()
             .setSharingMode(vk::SharingMode::eExclusive)
@@ -220,123 +195,10 @@ static inline UntypedBuffer create_mapped_untyped_buffer(
             .setUsage(vma::MemoryUsage::eAuto)
     );
 }
-
-static inline UntypedBuffer create_mapped_untyped_buffer_bda(
-    vk::Device device,
-    vma::Allocator allocator,
-    vk::BufferUsageFlags usage, 
-    vk::DeviceSize size
-) {
-    return create_untyped_buffer_bda(
-        device,
-        allocator,
-        vk::BufferCreateInfo()
-            .setSharingMode(vk::SharingMode::eExclusive)
-            .setSize(size)
-            .setUsage(usage),
-        vma::AllocationCreateInfo()
-            .setFlags(
-                vma::AllocationCreateFlagBits::eHostAccessSequentialWrite
-                    | vma::AllocationCreateFlagBits::eMapped
-            )
-            .setUsage(vma::MemoryUsage::eAuto)
-    );
-}
-
-template<typename T>
-Buffer<T> create_gpu_buffer(
-    vma::Allocator allocator,
-    vk::BufferUsageFlags usage, 
-    vk::DeviceSize length
-) {
-    UntypedBuffer buffer = create_untyped_buffer(
-        allocator,
-        vk::BufferCreateInfo()
-            .setSharingMode(vk::SharingMode::eExclusive)
-            .setSize(length * sizeof(T))
-            .setUsage(usage),
-        vma::AllocationCreateInfo()
-            .setUsage(vma::MemoryUsage::eGpuOnly)
-    );
-    return {buffer, length};
-}
-
-template<typename T>
-Buffer<T> create_gpu_buffer_bda(
-    vk::Device device,
-    vma::Allocator allocator,
-    vk::BufferUsageFlags usage, 
-    vk::DeviceSize length
-) {
-    UntypedBuffer buffer = create_gpu_untyped_buffer_bda(
-        device,
-        allocator,
-        usage,
-        length
-    );
-    return {buffer, length};
-}
-
-template<typename T>
-Buffer<T> create_mapped_buffer(
-    vma::Allocator allocator,
-    vk::BufferUsageFlags usage, 
-    vk::DeviceSize length
-) {
-    UntypedBuffer buffer = create_untyped_buffer(
-        allocator,
-        vk::BufferCreateInfo()
-            .setSharingMode(vk::SharingMode::eExclusive)
-            .setSize(length * sizeof(T))
-            .setUsage(usage),
-        vma::AllocationCreateInfo()
-            .setFlags(
-                vma::AllocationCreateFlagBits::eHostAccessSequentialWrite
-                    | vma::AllocationCreateFlagBits::eMapped
-            )
-            .setUsage(vma::MemoryUsage::eAuto)
-    );
-    return {buffer, length};
-}
-
-template<typename T>
-Buffer<T> create_mapped_buffer_bda(
-    vk::Device device,
-    vma::Allocator allocator,
-    vk::BufferUsageFlags usage, 
-    vk::DeviceSize length
-) {
-    UntypedBuffer buffer = create_untyped_buffer_bda(
-        device,
-        allocator,
-        vk::BufferCreateInfo()
-            .setSharingMode(vk::SharingMode::eExclusive)
-            .setSize(length * sizeof(T))
-            .setUsage(usage),
-        vma::AllocationCreateInfo()
-            .setFlags(
-                vma::AllocationCreateFlagBits::eHostAccessSequentialWrite
-                    | vma::AllocationCreateFlagBits::eMapped
-            )
-            .setUsage(vma::MemoryUsage::eAuto)
-    );
-    return {buffer, length};
-}
-
-template<typename T>
-Buffer<T> create_mapped_buffer_init(
-    vma::Allocator allocator,
-    vk::BufferUsageFlags usage, 
-    std::span<const T> data
-) {
-    Buffer buffer = create_mapped_buffer<T>(allocator, usage, data.size());
-    memcpy(buffer.get_mapped(), data.data(), data.size_bytes());
-    return buffer;
-}
-
 
 template<typename T>
 DynOffsetBuffer<T> create_dyn_offset_buffer(
+    vk::Device device, 
     vma::Allocator allocator,
     vk::BufferUsageFlags usage, 
     vk::DeviceSize length,
@@ -348,7 +210,8 @@ DynOffsetBuffer<T> create_dyn_offset_buffer(
         props->limits.minUniformBufferOffsetAlignment
     );
     vk::DeviceSize stride = (length * sizeof(T) + align - 1) & ~(align - 1);
-    UntypedBuffer buffer = create_untyped_buffer(
+    Buffer buffer = create_buffer(
+        device,
         allocator,
         vk::BufferCreateInfo()
             .setSharingMode(vk::SharingMode::eExclusive)

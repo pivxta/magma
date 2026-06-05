@@ -134,6 +134,8 @@ add_executable(
     src/materialmanager.cpp
     src/meshmanager.h
     src/meshmanager.cpp
+    src/freelist.h
+    src/arena.h
 )
 add_shaders(${PROJECT_NAME} shaders/shader.slang)
 add_compile_definitions(VULKAN_HPP_NO_EXCEPTIONS GLFW_INCLUDE_VULKAN)

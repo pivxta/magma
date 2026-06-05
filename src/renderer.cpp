@@ -737,7 +737,9 @@ private:
         this->current_buffer_offset += indices_size;
 
         vk::DeviceSize staging_size = vertices_size + indices_size;
-        UntypedBuffer staging = this->create_mapped_untyped_buffer(
+        Buffer staging = create_staging_buffer(
+            this->device,
+            this->allocator,
             vk::BufferUsageFlagBits::eTransferSrc,
             staging_size
         );
@@ -789,18 +791,23 @@ private:
             }
         }
 
-        UntypedBuffer static_buffer = this->create_bda_gpu_buffer(
+        Buffer static_buffer = create_gpu_buffer(
+            this->device,
+            this->allocator,
             vk::BufferUsageFlagBits::eIndexBuffer
                 | vk::BufferUsageFlagBits::eStorageBuffer
                 | vk::BufferUsageFlagBits::eTransferDst,
             vk::DeviceSize(16 * 1024 * 1024)
         );
 
-        UntypedBuffer instance_buffer = this->create_bda_mapped_buffer(
+        Buffer instance_buffer = create_mapped_buffer(
+            this->device,
+            this->allocator,
             vk::BufferUsageFlagBits::eStorageBuffer 
                 | vk::BufferUsageFlagBits::eTransferDst,
             instances.size() * sizeof(Instance)
         );
+
         memcpy(instance_buffer.mapped, instances.data(), instances.size() * sizeof(Instance));
 
         DynOffsetBuffer view_uniform_buffer = this->create_dyn_offset_buffer<ViewUniforms>(
@@ -837,33 +844,6 @@ private:
         this->light_uniform_buffer.destroy(this->allocator);
     }
 
-    UntypedBuffer create_mapped_untyped_buffer(vk::BufferUsageFlags usage, vk::DeviceSize size) {
-        return ::create_mapped_untyped_buffer(this->allocator, usage, size);
-    }
-
-    UntypedBuffer create_bda_mapped_buffer(vk::BufferUsageFlags usage, vk::DeviceSize size) {
-        return ::create_mapped_untyped_buffer_bda(this->device, this->allocator, usage, size);
-    }
-
-    UntypedBuffer create_bda_gpu_buffer(vk::BufferUsageFlags usage, vk::DeviceSize size) {
-        return ::create_gpu_untyped_buffer_bda(this->device, this->allocator, usage, size);
-    }
-
-    template<typename T>
-    Buffer<T> create_gpu_buffer(vk::BufferUsageFlags usage, vk::DeviceSize length) {
-        return ::create_gpu_buffer<T>(this->allocator, usage, length);
-    }
-    
-    template<typename T>
-    Buffer<T> create_mapped_buffer(vk::BufferUsageFlags usage, vk::DeviceSize length) {
-        return ::create_mapped_buffer<T>(this->allocator, usage, length);
-    }
-    
-    template<typename T>
-    Buffer<T> create_mapped_buffer_init(vk::BufferUsageFlags usage, std::span<const T> data) {
-        return ::create_mapped_buffer_init<T>(this->allocator, usage, data);
-    }
-
     Texture create_image(const vk::ImageCreateInfo& info) {
         return ::create_texture(this->device, this->allocator, info);
     }
@@ -874,7 +854,7 @@ private:
         vk::DeviceSize length,
         vk::DeviceSize count = FRAMES_IN_FLIGHT     
     ) {
-        return ::create_dyn_offset_buffer<T>(this->allocator, usage, length, count);
+        return ::create_dyn_offset_buffer<T>(this->device, this->allocator, usage, length, count);
     }
 
     void create_descriptor_pool() {
@@ -1016,7 +996,7 @@ private:
         DrawConstants draw_constants = {
             .instances = this->instance_buffer.address,
             .vertices = this->static_buffer.address + this->vertices_offset,
-            .materials = this->material_manager.buffer_device_address(this->frame_index)
+            .materials = this->material_manager.buffer_address(this->frame_index)
         };
         command_buffer.pushConstants<DrawConstants>(
             this->pipeline_layout,
@@ -1250,10 +1230,10 @@ private:
     DynOffsetBuffer<DirectionalLight> dir_light_buffer;
     DynOffsetBuffer<PointLight> point_light_buffer;
 
-    UntypedBuffer instance_buffer;
+    Buffer instance_buffer;
     uint32_t instance_count;
 
-    UntypedBuffer static_buffer;
+    Buffer static_buffer;
     vk::DeviceAddress current_buffer_offset;
 
     vk::DeviceAddress vertices_offset;
@@ -1284,7 +1264,7 @@ private:
         DirectionalLight { 
             .direction = glm::vec3(0.3f, 1.5f, 0.6f),
             .color = glm::vec3(1.0f, 1.0f, 1.0f),
-            .illuminance = 2.0f
+            .illuminance = 4.0f
         }
     };
 };

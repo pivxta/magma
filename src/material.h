@@ -11,7 +11,7 @@ struct Material {
 
     glm::vec3 base_color_factor = glm::vec3(0.5f);
     float normal_factor = 1.0f;
-    float displacement_factor = 0.0f;
+    float displacement_factor = 0.05f;
     float roughness_factor = 0.5f;
     float metallic_factor = 0.0f;
     float ior = 1.5f;
@@ -37,7 +37,6 @@ struct Material {
     }
 
     Material& set_displacement_map(TextureId id) {
-        this->displacement_factor = 0.05f;
         this->displacement_map = id;
         return *this;
     }
