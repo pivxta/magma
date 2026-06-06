@@ -6,31 +6,8 @@ struct Vertex {
 }
 
 struct Instance {
-    float3 local_to_world_x;
-    float3 local_to_world_y;
-    float3 local_to_world_z;
-    float3 translation;
+    float3x4 local_to_world;
     uint32_t material_index;
-
-    float3 transform_point(float3 point) {
-        return this.local_to_world_x * point.x
-            + this.local_to_world_y * point.y
-            + this.local_to_world_z * point.z
-            + this.translation;
-    }
-
-    float3 transform_vector(float3 vector) {
-        return this.local_to_world_x * vector.x
-            + this.local_to_world_y * vector.y
-            + this.local_to_world_z * vector.z;
-    }
-
-    float3 transform_normal(float3 normal) {
-        // The scaling is uniform so this is fine
-        return this.local_to_world_x * normal.x
-            + this.local_to_world_y * normal.y
-            + this.local_to_world_z * normal.z;
-    }
 }
 
 struct DrawConstants {
@@ -43,7 +20,8 @@ struct DrawConstants {
     ImmutablePtr<Material> materials;
 }
 
-[[vk::push_constant]] DrawConstants constants;
+[[vk::push_constant]] 
+DrawConstants constants;
 
 struct VertexOutput {
     float4 sv_position : SV_Position;
@@ -64,9 +42,9 @@ struct ViewUniforms {
 VertexOutput vertexMain(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
     Instance instance = constants.instances[instance_id];
     Vertex vertex = constants.vertices[vertex_id];
-    float3 world_position = instance.transform_point(vertex.position);
-    float3 world_normal = instance.transform_normal(vertex.normal);
-    float3 world_tangent = instance.transform_vector(vertex.tangent.xyz);
+    var world_position = float3(mul(instance.local_to_world, float4(vertex.position, 1.0)));
+    var world_normal = float3(mul(instance.local_to_world, float4(vertex.normal, 0.0)));
+    var world_tangent = float3(mul(instance.local_to_world, float4(vertex.tangent.xyz, 0.0)));
     
     VertexOutput output;
     output.sv_position = mul(constants.view.world_to_clip, float4(world_position, 1.0));

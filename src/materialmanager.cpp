@@ -140,7 +140,7 @@ void MaterialManager::update_dirty(const TextureManager& texture_manager, uint32
 
     vk::DeviceSize write_start = this->buffers[frame_index].size;
     vk::DeviceSize write_end = 0;
-    auto mapped_data = reinterpret_cast<MaterialData*>(this->buffers[frame_index].mapped);
+    auto mapped_data = reinterpret_cast<MaterialData*>(this->buffers[frame_index].mapped_data);
     for (auto key: this->dirty[frame_index]) {
         auto entry_offset = static_cast<vk::DeviceSize>(key.index) * sizeof(MaterialData);
         auto entry_size = static_cast<vk::DeviceSize>(sizeof(MaterialData));

@@ -9,7 +9,7 @@ struct Buffer {
     vma::Allocation allocation;
     vk::DeviceSize size;
     vk::DeviceAddress address;
-    void *mapped;
+    void *mapped_data;
 
     void destroy(vma::Allocator allocator) {
         allocator.destroyBuffer(this->buffer, this->allocation);
@@ -17,11 +17,11 @@ struct Buffer {
         this->allocation = vma::Allocation();
         this->size = 0;
         this->address = 0;
-        this->mapped = nullptr;
+        this->mapped_data = nullptr;
     }
 
-    void* get_mapped(vk::DeviceSize offset_bytes) {
-        return reinterpret_cast<uint8_t*>(this->mapped) + offset_bytes;
+    void* mapped(vk::DeviceSize offset_bytes) {
+        return reinterpret_cast<uint8_t*>(this->mapped_data) + offset_bytes;
     }
 
     void flush(
@@ -66,7 +66,7 @@ static Buffer create_buffer(
         .allocation = allocation,
         .size = buffer_info.size,
         .address = address,
-        .mapped = info.pMappedData
+        .mapped_data = info.pMappedData
     };
 }
 

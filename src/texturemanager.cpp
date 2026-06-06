@@ -492,7 +492,7 @@ static Texture upload_into_texture(
         vk::BufferUsageFlagBits::eTransferSrc,
         src.bytes.size()
     );
-    memcpy(staging.mapped, src.bytes.data(), src.bytes.size());
+    memcpy(staging.mapped_data, src.bytes.data(), src.bytes.size());
     vk::CommandBuffer command_buffer = begin_one_shot_commands(device, command_pool);
     record_buffer_to_image_copy(command_buffer, texture, staging);
     record_image_mip_generation(command_buffer, texture);

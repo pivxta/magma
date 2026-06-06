@@ -4,44 +4,59 @@
 #include <vulkan/vulkan.hpp>
 #include <vk_mem_alloc.hpp>
 
+template<typename T>
 struct FrameSubBuffer {
-    vma::Allocation parent_allocation;
-    vk::DeviceAddress base_address;
-    vk::DeviceSize base_offset;
-    void* mapped;
+public:
+    vk::DeviceSize length() const {
+        return this->elem_count;
+    }
 
-    ArenaAllocation<vk::DeviceSize> local_range;
-
-    vk::DeviceSize size() const {
+    vk::DeviceSize size_bytes() const {
         return this->local_range.size;
     }
     
-    template<typename T>
-    T* mapped_as() {
-        return reinterpret_cast<T*>(this->mapped);
-    }
-
-    template<typename T>
-    void write(const T& memory, vk::DeviceSize offset = 0) {
-        memcpy(this->mapped_as<uint8_t>() + offset, &memory, sizeof(T));
+    vk::DeviceAddress address() const {
+        return this->base_address;
     }
     
-    template<typename T>
-    void write_array(std::span<T> memory, vk::DeviceSize offset = 0) {
-        memcpy(this->mapped_as<uint8_t>() + offset, memory.data(), memory.size_bytes());
+    T* mapped() {
+        return reinterpret_cast<T*>(this->mapped_data);
+    }
+
+    void write(const T& memory, vk::DeviceSize first = 0) {
+        memcpy(this->mapped() + first, &memory, sizeof(T));
+    }
+    
+    void write(std::span<T> memory, vk::DeviceSize first = 0) {
+        memcpy(this->mapped() + first, memory.data(), memory.size_bytes());
     }
 
     bool flush(
         vma::Allocator allocator,
-        vk::DeviceSize offset = 0,
-        std::optional<vk::DeviceSize> size = std::nullopt
+        vk::DeviceSize first = 0,
+        std::optional<vk::DeviceSize> count = std::nullopt
     ) {
+        vk::DeviceSize flush_size = this->local_range.size;
+        if (count.has_value()) {
+            flush_size = count.value() * sizeof(T);
+        }
+
         return allocator.flushAllocation(
             this->parent_allocation, 
-            this->base_offset + offset, 
-            size.value_or(this->local_range.size)
+            this->base_offset + first * sizeof(T), 
+            flush_size
         ) == vk::Result::eSuccess;
     }
+private:
+    friend class FrameArena;
+
+    vma::Allocation parent_allocation;
+    vk::DeviceAddress base_address;
+    vk::DeviceSize base_offset;
+    vk::DeviceSize elem_count;
+    void* mapped_data;
+
+    ArenaAllocation<vk::DeviceSize> local_range;
 };
 
 
@@ -60,11 +75,11 @@ public:
     void destroy();
 
     template<typename T>
-    std::optional<FrameSubBuffer> add(
+    std::optional<FrameSubBuffer<T>> add(
         const T& value, 
         vk::DeviceSize alignment = DEFAULT_ALIGNMENT
     ) {
-        std::optional<FrameSubBuffer> buffer = this->allocate<T>(1, alignment);
+        auto buffer = this->allocate<T>(1, alignment);
         if (!buffer.has_value()) {
             return std::nullopt;
         }
@@ -74,32 +89,40 @@ public:
     }
 
     template<typename T>
-    std::optional<FrameSubBuffer> add_array(
+    std::optional<FrameSubBuffer<T>> add_array(
         std::span<T> values, 
         vk::DeviceSize alignment = DEFAULT_ALIGNMENT
     ) {
-        std::optional<FrameSubBuffer> buffer = this->allocate<T>(values.size(), alignment);
+        auto buffer = this->allocate<T>(values.size(), alignment);
         if (!buffer.has_value()) {
             return std::nullopt;
         }
-        buffer->write_array(values);
+        buffer->write(values);
         buffer->flush(this->allocator);
         return buffer;
     }
 
     template<typename T>
-    std::optional<FrameSubBuffer> allocate(
+    std::optional<FrameSubBuffer<T>> allocate(
         vk::DeviceSize count = 1,
         vk::DeviceSize min_alignment = DEFAULT_ALIGNMENT
     ) {
         vk::DeviceSize alignment = std::max(alignof(T), min_alignment);
-        return this->allocate(count * sizeof(T), alignment);
-    }
+        auto alloc = this->arena.allocate(count * sizeof(T), alignment);
+        if (!alloc.has_value()) {
+            return std::nullopt;
+        }
 
-    std::optional<FrameSubBuffer> allocate(
-        vk::DeviceSize size,
-        vk::DeviceSize alignment = DEFAULT_ALIGNMENT
-    );
+        vk::DeviceSize offset = this->stride * this->frame_index + alloc->offset;
+        FrameSubBuffer<T> allocation;
+        allocation.parent_allocation = this->buffer.allocation;
+        allocation.base_address = this->buffer.address + offset;
+        allocation.base_offset = offset;
+        allocation.elem_count = count;
+        allocation.mapped_data = this->buffer.mapped(offset);
+        allocation.local_range = *alloc;
+        return allocation;
+    }
 
     void reset();
 

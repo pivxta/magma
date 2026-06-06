@@ -119,10 +119,11 @@ struct LightData {
 };
 
 struct FrameData {
-    FrameSubBuffer view_data;
-    FrameSubBuffer light_data;
-    FrameSubBuffer dir_lights;
-    FrameSubBuffer point_lights;
+    FrameSubBuffer<ViewData> view_data;
+    FrameSubBuffer<LightData> light_data;
+    FrameSubBuffer<DirectionalLightData> dir_lights;
+    FrameSubBuffer<PointLightData> point_lights;
+    FrameSubBuffer<InstanceData> instances;
 };
 
 static inline std::vector<uint32_t> read_spirv_file(const std::filesystem::path& path) {
@@ -321,12 +322,17 @@ struct Renderer::Inner {
             .add_array(std::span(this->point_lights))
             .value();
 
+        FrameSubBuffer instances = this->frame_arena
+            .add_array(std::span(this->instances))
+            .value();
+
         vk::CommandBuffer command_buffer = this->begin_frame_commands();
         this->record_frame_commands(command_buffer, image, FrameData{
             .view_data = view_data,
             .light_data = light_data,
             .dir_lights = dir_lights,
-            .point_lights = point_lights
+            .point_lights = point_lights,
+            .instances = instances
         });
         this->submit_frame_commands(command_buffer, image);
 
@@ -710,10 +716,10 @@ private:
             vk::BufferUsageFlagBits::eTransferSrc,
             staging_size
         );
-        memcpy(staging.mapped, vertices.data(), vertices_size);
+        memcpy(staging.mapped_data, vertices.data(), vertices_size);
         if (mesh.indices.has_value()) {
             memcpy(
-                reinterpret_cast<uint8_t*>(staging.mapped) + indices_offset, 
+                reinterpret_cast<uint8_t*>(staging.mapped_data) + indices_offset, 
                 mesh.indices.value().data(), 
                 indices_size
             );
@@ -742,8 +748,6 @@ private:
         const int columns = 32;
         const float spacing = 2.0f;
 
-        std::vector<InstanceData> instances;
-
         for (int layer = 0; layer < layers; layer++) {
             for (int row = 0; row < rows; row++) {
                 for (int column = 0; column < columns; column++) {
@@ -753,7 +757,7 @@ private:
                     float x = (frow - static_cast<float>(rows) * 0.5f + 0.5f) * spacing;
                     float z = (fcolumn - static_cast<float>(columns) * 0.5f + 0.5f) * spacing;
                     float y = flayer * spacing + 1.0f;
-                    instances.emplace_back(1, glm::vec3(x, y, z));
+                    this->instances.emplace_back(1, glm::vec3(x, y, z));
                 }
             }
         }
@@ -767,24 +771,11 @@ private:
             vk::DeviceSize(16 * 1024 * 1024)
         );
 
-        Buffer instance_buffer = create_mapped_buffer(
-            this->device,
-            this->allocator,
-            vk::BufferUsageFlagBits::eStorageBuffer 
-                | vk::BufferUsageFlagBits::eTransferDst,
-            instances.size() * sizeof(InstanceData)
-        );
-
-        memcpy(instance_buffer.mapped, instances.data(), instances.size() * sizeof(InstanceData));
-
         this->static_buffer = static_buffer;
         this->current_buffer_offset = 0;
-        this->instance_count = uint32_t(instances.size());
-        this->instance_buffer = instance_buffer;
     }
 
     void destroy_buffers() {
-        this->instance_buffer.destroy(this->allocator);
         this->static_buffer.destroy(this->allocator);
     }
 
@@ -798,11 +789,11 @@ private:
         const FrameData& data
     ) {
         DrawConstants draw_constants = {
-            .view_data = data.view_data.base_address,
-            .light_data = data.light_data.base_address,
-            .point_lights = data.point_lights.base_address,
-            .directional_lights = data.dir_lights.base_address,
-            .instances = this->instance_buffer.address,
+            .view_data = data.view_data.address(),
+            .light_data = data.light_data.address(),
+            .point_lights = data.point_lights.address(),
+            .directional_lights = data.dir_lights.address(),
+            .instances = data.instances.address(),
             .vertices = this->static_buffer.address + this->vertices_offset,
             .materials = this->material_manager.buffer_address(this->frame_index)
         };
@@ -907,7 +898,7 @@ private:
         command_buffer.bindIndexBuffer(this->static_buffer, this->indices_offset, vk::IndexType::eUint32);
         command_buffer.drawIndexed(
             this->index_count, 
-            this->instance_count, 
+            static_cast<uint32_t>(this->instances.size()), 
             0, 0, 0
         );
         command_buffer.endRendering();
@@ -1020,9 +1011,6 @@ private:
     vk::Pipeline pipeline;
     vk::PipelineLayout pipeline_layout;
 
-    Buffer instance_buffer;
-    uint32_t instance_count;
-
     Buffer static_buffer;
     vk::DeviceAddress current_buffer_offset;
 
@@ -1058,6 +1046,7 @@ private:
             .illuminance = 4.0f
         }
     };
+    std::vector<InstanceData> instances;
 };
 
 Renderer::Renderer() = default;

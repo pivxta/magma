@@ -24,25 +24,6 @@ void FrameArena::destroy() {
     this->buffer.destroy(this->allocator);
 }
 
-std::optional<FrameSubBuffer> FrameArena::allocate(
-    vk::DeviceSize size, 
-    vk::DeviceSize aligmnent
-) {
-    auto alloc = this->arena.allocate(size, aligmnent);
-    if (!alloc.has_value()) {
-        return std::nullopt;
-    }
-
-    vk::DeviceSize offset = this->stride * this->frame_index + alloc->offset;
-    return FrameSubBuffer{
-        .parent_allocation = this->buffer.allocation,
-        .base_address = this->buffer.address + offset,
-        .base_offset = offset,
-        .mapped = this->buffer.get_mapped(offset),
-        .local_range = *alloc,
-    };
-}
-
 void FrameArena::reset() {
     this->frame_index = (this->frame_index + 1) % this->frames_in_flight;
     this->arena.reset();
