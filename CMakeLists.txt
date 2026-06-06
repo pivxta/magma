@@ -138,6 +138,8 @@ add_executable(
     src/arena.h
     src/framearena.h
     src/framearena.cpp
+    src/uploader.h
+    src/uploader.cpp
 )
 add_shaders(${PROJECT_NAME} shaders/shader.slang)
 add_compile_definitions(VULKAN_HPP_NO_EXCEPTIONS GLFW_INCLUDE_VULKAN)

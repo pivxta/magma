@@ -191,11 +191,6 @@ struct TextureIndices {
     uint sampler;
 }
 
-struct MaterialFragmentProperties<B: Brdf> {
-    FragmentProperties fragment;
-    B brdf;
-}
-
 struct Material {
     TextureIndices base_color;
     TextureIndices normal_map;
@@ -257,7 +252,7 @@ struct Material {
         return lerp(current_tex_coords, prev_tex_coords, weight);
     }
 
-    MaterialFragmentProperties<CookTorranceBrdf> get_fragment_properties(
+    Tuple<FragmentProperties, CookTorranceBrdf> get_fragment_properties(
         float3 view_position,
         float3 position,
         float3 normal,
@@ -321,10 +316,7 @@ struct Material {
         brdf.metallic = aorm.b;
         brdf.ior = this.ior;
         
-        return {
-            fragment,
-            brdf
-        };
+        return {fragment, brdf};
     }
 };
 
@@ -350,16 +342,18 @@ float4 fragmentMain(FragmentInput input) : SV_Target {
         input.handedness,
         input.tex_coords
     );
-    var color = props.fragment.base_color 
-        * props.fragment.ambient_occlusion
+    let fragment = props._0;
+    let brdf = props._1;
+    var color = fragment.base_color 
+        * fragment.ambient_occlusion
         * constants.light.ambient_color 
         * constants.light.ambient_illuminance;
     
     for (uint i = 0; i < constants.light.directional_count; i++) {
         color += calculate_radiance(
             constants.directional_lights[i], 
-            props.brdf,
-            props.fragment,
+            brdf,
+            fragment,
             constants.view.position
         );
     }
@@ -367,8 +361,8 @@ float4 fragmentMain(FragmentInput input) : SV_Target {
     for (uint i = 0; i < constants.light.point_count; i++) {
         color += calculate_radiance(
             constants.point_lights[i], 
-            props.brdf,
-            props.fragment,
+            brdf,
+            fragment,
             constants.view.position
         );
     }
