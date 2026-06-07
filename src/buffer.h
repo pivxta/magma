@@ -2,7 +2,7 @@
 #include <vk_mem_alloc.hpp>
 #include <vulkan/vulkan.hpp>
 #include <vk_mem_alloc.hpp>
-#include "vkerror.h"
+#include "vk_error.h"
 
 struct Buffer {
     vk::Buffer buffer;
@@ -21,6 +21,10 @@ struct Buffer {
     }
 
     void* mapped(vk::DeviceSize offset_bytes) {
+        if (this->mapped_data == nullptr) {
+            return nullptr;
+        }
+        
         return reinterpret_cast<uint8_t*>(this->mapped_data) + offset_bytes;
     }
 

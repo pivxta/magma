@@ -1,6 +1,6 @@
 #include "swapchain.h"
 #include "target.h"
-#include "vkerror.h"
+#include "vk_error.h"
 
 Swapchain::Swapchain(vk::Instance instance, const std::shared_ptr<Target>& target) {
     this->instance = instance;

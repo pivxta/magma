@@ -5,6 +5,7 @@
 #include <vk_mem_alloc.hpp>
 
 template<typename T>
+requires std::is_trivially_copyable_v<T>
 struct FrameSubBuffer {
 public:
     vk::DeviceSize length() const {
@@ -27,7 +28,7 @@ public:
         memcpy(this->mapped() + first, &memory, sizeof(T));
     }
     
-    void write(std::span<T> memory, vk::DeviceSize first = 0) {
+    void write(std::span<const T> memory, vk::DeviceSize first = 0) {
         memcpy(this->mapped() + first, memory.data(), memory.size_bytes());
     }
 
@@ -48,7 +49,7 @@ public:
         ) == vk::Result::eSuccess;
     }
 private:
-    friend class FrameArena;
+    friend class FrameArenaBuffer;
 
     vma::Allocation parent_allocation;
     vk::DeviceAddress base_address;
@@ -60,12 +61,12 @@ private:
 };
 
 
-class FrameArena {
+class FrameArenaBuffer {
 public:
     static constexpr vk::DeviceSize DEFAULT_ALIGNMENT = 16;
 
-    FrameArena() = default;
-    FrameArena(
+    FrameArenaBuffer() = default;
+    FrameArenaBuffer(
         vk::Device device, 
         vma::Allocator allocator, 
         vk::BufferUsageFlags usage,
@@ -75,6 +76,7 @@ public:
     void destroy();
 
     template<typename T>
+    requires std::is_trivially_copyable_v<T>
     std::optional<FrameSubBuffer<T>> add(
         const T& value, 
         vk::DeviceSize alignment = DEFAULT_ALIGNMENT
@@ -89,8 +91,9 @@ public:
     }
 
     template<typename T>
-    std::optional<FrameSubBuffer<T>> add_array(
-        std::span<T> values, 
+    requires std::is_trivially_copyable_v<T>
+    std::optional<FrameSubBuffer<T>> add(
+        std::span<const T> values, 
         vk::DeviceSize alignment = DEFAULT_ALIGNMENT
     ) {
         auto buffer = this->allocate<T>(values.size(), alignment);
@@ -103,6 +106,16 @@ public:
     }
 
     template<typename T>
+    requires std::is_trivially_copyable_v<T>
+    std::optional<FrameSubBuffer<T>> add(
+        const std::vector<T>& values, 
+        vk::DeviceSize alignment = DEFAULT_ALIGNMENT
+    ) {
+        return this->add<T>(std::span(values), alignment);
+    }
+
+    template<typename T>
+    requires std::is_trivially_copyable_v<T>
     std::optional<FrameSubBuffer<T>> allocate(
         vk::DeviceSize count = 1,
         vk::DeviceSize min_alignment = DEFAULT_ALIGNMENT

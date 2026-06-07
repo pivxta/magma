@@ -1,6 +1,6 @@
-#include "framearena.h"
+#include "frame_arena_buffer.h"
 
-FrameArena::FrameArena(
+FrameArenaBuffer::FrameArenaBuffer(
     vk::Device device, 
     vma::Allocator allocator, 
     vk::BufferUsageFlags usage,
@@ -19,11 +19,11 @@ FrameArena::FrameArena(
     );
 }
 
-void FrameArena::destroy() {
+void FrameArenaBuffer::destroy() {
     this->buffer.destroy(this->allocator);
 }
 
-void FrameArena::begin_frame(uint32_t next_frame_index) {
+void FrameArenaBuffer::begin_frame(uint32_t next_frame_index) {
     this->frame_index = next_frame_index;
     this->arena.reset();
 }

@@ -22,6 +22,11 @@ class FreeList {
 public:
     static_assert(std::is_unsigned_v<T>, "Free list requires an unsigned integer type");
  
+    FreeList() {
+        this->capacity = 0;
+        this->policy = FreeListPolicy::FirstFit;
+    }
+
     FreeList(T capacity, FreeListPolicy policy) {
         this->capacity = capacity;
         this->policy = policy;

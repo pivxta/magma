@@ -1,6 +1,6 @@
 #pragma once
 #include "resource.h"
-#include "slotmap.h"
+#include "slot_map.h"
 #include "material.h"
 #include "buffer.h"
 #include <vector>

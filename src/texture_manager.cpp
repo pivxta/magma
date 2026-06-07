@@ -1,6 +1,6 @@
-#include "texturemanager.h"
+#include "texture_manager.h"
 #include "image.h"
-#include "vkerror.h"
+#include "vk_error.h"
 #include <cassert>
 #include <spdlog/spdlog.h>
 
@@ -141,10 +141,10 @@ TextureIndices TextureManager::get_fallback_indices(TextureFallback fallback) co
     };
 }
 
-void TextureManager::destroy_pending(uint64_t frame_counter) {
+void TextureManager::destroy_pending() {
     while (!this->destroy_queue.empty()) {
         const PendingDestroy& pending = this->destroy_queue.back();
-        if (frame_counter - pending.request_frame >= this->frames_in_flight) {
+        if (this->frame_counter - pending.request_frame >= this->frames_in_flight) {
             this->destroy_texture(pending.texture);
             this->destroy_queue.pop_back();
         } else {
@@ -188,14 +188,13 @@ TextureId TextureManager::add(
 void TextureManager::set(
     TextureId id,
     Uploader& uploader,
-    uint64_t frame_counter,
     const Image& image,
     TextureFallback fallback
 ) {
     if (auto slot = this->slots.get(get_slot_key(id)); slot != nullptr) {
         if (slot->texture.has_value()) {
             this->destroy_queue.push_front(PendingDestroy{
-                .request_frame = frame_counter,
+                .request_frame = this->frame_counter,
                 .texture = *slot->texture
             });
         }
@@ -209,60 +208,16 @@ void TextureManager::set(
     }
 }
 
-void TextureManager::request_free(TextureId id, uint64_t frame_counter) {
+void TextureManager::free(TextureId id) {
     this->slots.free(get_slot_key(id), [&](Slot& slot) {
         if (slot.texture.has_value()) {
             this->destroy_queue.push_front(PendingDestroy{
-                .request_frame = frame_counter,
+                .request_frame = this->frame_counter,
                 .texture = slot.texture.value()
             });
         }
         this->updated.push_back(id);
     });
-}
-
-vk::CommandBuffer begin_one_shot_commands(vk::Device device, vk::CommandPool pool) {
-    auto [result, command_buffer] = device.allocateCommandBuffers(
-        vk::CommandBufferAllocateInfo()
-            .setCommandPool(pool)
-            .setCommandBufferCount(1)
-            .setLevel(vk::CommandBufferLevel::ePrimary)
-    );
-    vk_expect(result, "Failed to create one-shot command buffer");
-    vk_expect(
-        command_buffer[0].begin(
-            vk::CommandBufferBeginInfo()
-                .setFlags(vk::CommandBufferUsageFlagBits::eOneTimeSubmit)
-        ),
-        "Failed to begin one-shot command buffer"
-    );
-    return command_buffer[0];
-}
-
-void submit_one_shot_commands_sync(
-    vk::Device device, 
-    vk::Queue queue, 
-    vk::CommandPool pool,
-    vk::CommandBuffer command_buffer
-) {
-    vk_expect(command_buffer.end(), "Failed to end one-shot command buffer");
-
-    auto [result, fence] = device.createFence(vk::FenceCreateInfo());
-    vk_expect(result, "Failed to create fence");
-
-    auto command_buffer_info = vk::CommandBufferSubmitInfo().setCommandBuffer(command_buffer);
-
-    vk_expect(
-        queue.submit2(vk::SubmitInfo2().setCommandBufferInfos(command_buffer_info), fence),
-        "Failed to submit one-shot command buffer"
-    );
-    vk_expect(
-        device.waitForFences(fence, true, std::numeric_limits<uint64_t>::max()),
-        "Wait for fence failed"
-    );
-
-    device.destroyFence(fence);
-    device.freeCommandBuffers(pool, command_buffer);
 }
 
 static vk::Format get_image_format(ImageFormat image_format) {

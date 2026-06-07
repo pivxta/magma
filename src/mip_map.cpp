@@ -1,4 +1,4 @@
-#include "mipmap.h"
+#include "mip_map.h"
 
 void MipmapGenerator::generate(Texture texture) {
     this->pending_gens.push_back(PendingGeneration{texture});

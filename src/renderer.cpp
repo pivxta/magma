@@ -1,17 +1,18 @@
 #define VMA_IMPLEMENTATION
 #include "renderer.h"
 #include "swapchain.h"
-#include "vkerror.h"
+#include "vk_error.h"
 #include "uploader.h"
 #include "target.h"
-#include "framearena.h"
+#include "heap_buffer.h"
+#include "frame_arena_buffer.h"
 #include "camera.h"
 #include "image.h"
 #include "mesh.h"
 #include "texture.h"
 #include "buffer.h"
-#include "texturemanager.h"
-#include "materialmanager.h"
+#include "texture_manager.h"
+#include "material_manager.h"
 #include "time.h"
 #include <vector>
 #include <optional>
@@ -27,8 +28,8 @@
 #include <glm/gtc/quaternion.hpp>
 #include <vulkan/vulkan.hpp>
 
-static constexpr uint32_t MAX_TEXTURES = 256;
-static constexpr uint32_t MAX_MATERIALS = 256;
+static constexpr uint32_t MAX_TEXTURES = 4096;
+static constexpr uint32_t MAX_MATERIALS = 2048;
 static constexpr auto FRAME_ARENA_CAPACITY_PER_FIF = vk::DeviceSize(16 * 1024 * 1024);
 static constexpr auto UPLOADER_CAPACITY_PER_FIF = vk::DeviceSize(64 * 1024 * 1024);
 
@@ -87,7 +88,6 @@ struct InstanceData {
         this->local_to_world[3] = translation;
     }
 };
-
 
 struct AmbientLightData {
     glm::vec3 color;
@@ -186,7 +186,7 @@ struct Renderer::Inner {
             FRAMES_IN_FLIGHT,
             MAX_MATERIALS
         );
-        this->frame_arena = FrameArena(
+        this->frame_arena = FrameArenaBuffer(
             this->device,
             this->allocator,
             vk::BufferUsageFlagBits::eStorageBuffer,
@@ -230,16 +230,11 @@ struct Renderer::Inner {
     }
 
     void set_texture(TextureId id, const Image& image) {
-        this->texture_manager.set(
-            id,
-            this->uploader,
-            this->frame_counter,
-            image
-        );
+        this->texture_manager.set(id, this->uploader, image);
     }
 
     void free_texture(TextureId id) {
-        this->texture_manager.request_free(id, this->frame_counter);
+        this->texture_manager.free(id);
     }
 
     MaterialId add_material(const Material& material) {
@@ -268,6 +263,7 @@ struct Renderer::Inner {
 
     void draw_frame() {
         vk::Fence fence = this->fences[this->frame_index];
+
         vk_expect(
             device.waitForFences(
                 fence, true, 
@@ -290,54 +286,18 @@ struct Renderer::Inner {
             vk_expect(result1, "Critical swapchain image acquisition failure");
         }
 
-        this->texture_manager.destroy_pending(this->frame_counter);
+        this->static_buffer.free_pending();
+        this->texture_manager.destroy_pending();
         this->material_manager.flag_dirty_materials(this->texture_manager);
         this->material_manager.update_dirty(this->texture_manager, this->frame_index);
         this->texture_manager.clear_updated();
-        this->frame_arena.begin_frame(this->frame_index);
 
-        vk::Extent2D viewport_size = this->swapchain.get_extent();
-        auto viewport_width = static_cast<float>(viewport_size.width);
-        auto viewport_height = static_cast<float>(viewport_size.height);
-
-        FrameSubBuffer view_data = this->frame_arena
-            .add(ViewData{
-                .world_to_clip = this->camera.world_to_clip(viewport_width, viewport_height),
-                .position = this->camera.transform.translation,
-            })
-            .value();
-
-        FrameSubBuffer light_data = this->frame_arena
-            .add(LightData {
-                .ambient_color = this->ambient_light.color,
-                .ambient_illuminance = this->ambient_light.illuminance,
-                .point_count = static_cast<uint32_t>(this->point_lights.size()),
-                .directional_count = static_cast<uint32_t>(this->directional_lights.size()),
-            })
-            .value();
-
-        FrameSubBuffer dir_lights = this->frame_arena
-            .add_array(std::span(this->directional_lights))
-            .value();
-
-        FrameSubBuffer point_lights = this->frame_arena
-            .add_array(std::span(this->point_lights))
-            .value();
-
-        FrameSubBuffer instances = this->frame_arena
-            .add_array(std::span(this->instances))
-            .value();
+        FrameData frame_data = this->write_frame_data();
 
         vk::CommandBuffer command_buffer = this->begin_frame_commands();
         this->uploader.flush(command_buffer);
-        this->texture_manager.flush_mipmaps(command_buffer);
-        this->record_frame_commands(command_buffer, image, FrameData{
-            .view_data = view_data,
-            .light_data = light_data,
-            .dir_lights = dir_lights,
-            .point_lights = point_lights,
-            .instances = instances
-        });
+        this->texture_manager.flush_mip_maps(command_buffer);
+        this->record_frame_commands(command_buffer, image, frame_data);
         this->submit_frame_commands(command_buffer, image);
 
         vk::Result result2 = this->swapchain.present(this->queue, image);
@@ -350,7 +310,11 @@ struct Renderer::Inner {
 
         this->frame_counter += 1;
         this->frame_index = this->frame_counter % FRAMES_IN_FLIGHT;
+
         this->uploader.begin_frame(this->frame_index);
+        this->texture_manager.begin_frame(this->frame_counter);
+        this->frame_arena.begin_frame(this->frame_index);
+        this->static_buffer.begin_frame(this->frame_counter);
     }
 
 private:
@@ -704,39 +668,32 @@ private:
             return;
         }
 
-        vk::DeviceSize vertices_offset = this->current_buffer_offset;
-        vk::DeviceSize vertices_size = vertices.size() * sizeof(VertexData);
-        this->current_buffer_offset += vertices_size;
-
-        vk::DeviceSize indices_offset = vertices_size;
-        vk::DeviceSize indices_count = mesh.indices.has_value() ? 
-            mesh.indices.value().size() : 0;
-        vk::DeviceSize indices_size = indices_count * sizeof(uint32_t);
-        this->current_buffer_offset += indices_size;
+        HeapSubBuffer<VertexData> vertices_sub = this->static_buffer
+            .allocate<VertexData>(vertices.size())
+            .value();
+        HeapSubBuffer<uint32_t> indices_sub = this->static_buffer
+            .allocate<uint32_t>(mesh.indices.value().size())
+            .value();
 
         this->uploader.upload_buffer(
             BufferUpload()
-                .set_buffer(this->static_buffer)
-                .set_offset(vertices_offset)
+                .set_buffer(this->static_buffer.buffer())
+                .set_offset(vertices_sub.buffer_offset())
                 .set_memory(std::span(vertices))
                 .set_dst_access_mask(vk::AccessFlagBits2::eShaderStorageRead)
                 .set_dst_stage_mask(vk::PipelineStageFlagBits2::eVertexShader)
         );
         this->uploader.upload_buffer(
             BufferUpload()
-                .set_buffer(this->static_buffer)
-                .set_offset(indices_offset)
+                .set_buffer(this->static_buffer.buffer())
+                .set_offset(indices_sub.buffer_offset())
                 .set_memory(std::span(mesh.indices.value()))
                 .set_dst_access_mask(vk::AccessFlagBits2::eIndexRead)
                 .set_dst_stage_mask(vk::PipelineStageFlagBits2::eIndexInput)
         );
 
-        this->vertices_offset = vertices_offset;
-        this->vertices_size = vertices_size;
-        this->vertex_count = uint32_t(vertices.size());
-        this->indices_offset = indices_offset;
-        this->indices_size = indices_size;
-        this->index_count = indices_count;
+        this->vertices = vertices_sub;
+        this->indices = indices_sub;
     }
 
     void create_buffers() {
@@ -759,25 +716,64 @@ private:
             }
         }
 
-        Buffer static_buffer = create_gpu_buffer(
+        this->static_buffer = HeapBuffer(
             this->device,
             this->allocator,
-            vk::BufferUsageFlagBits::eIndexBuffer
-                | vk::BufferUsageFlagBits::eStorageBuffer
-                | vk::BufferUsageFlagBits::eTransferDst,
-            vk::DeviceSize(16 * 1024 * 1024)
+            FRAMES_IN_FLIGHT,
+            256,
+            vk::BufferCreateInfo()
+                .setSharingMode(vk::SharingMode::eExclusive)
+                .setSize(vk::DeviceSize(16 * 1024 * 1024))
+                .setUsage(
+                    vk::BufferUsageFlagBits::eShaderDeviceAddress
+                        | vk::BufferUsageFlagBits::eTransferDst
+                        | vk::BufferUsageFlagBits::eIndexBuffer
+                ),
+            vma::AllocationCreateInfo()
+                .setUsage(vma::MemoryUsage::eGpuOnly)
         );
-
-        this->static_buffer = static_buffer;
-        this->current_buffer_offset = 0;
     }
 
     void destroy_buffers() {
-        this->static_buffer.destroy(this->allocator);
+        this->static_buffer.destroy();
     }
 
     Texture create_image(const vk::ImageCreateInfo& info) {
         return ::create_texture(this->device, this->allocator, info);
+    }
+
+    FrameData write_frame_data() {
+        vk::Extent2D viewport_size = this->swapchain.get_extent();
+        auto viewport_width = static_cast<float>(viewport_size.width);
+        auto viewport_height = static_cast<float>(viewport_size.height);
+
+        FrameSubBuffer view_data = this->frame_arena
+            .add(ViewData{
+                .world_to_clip = this->camera.world_to_clip(viewport_width, viewport_height),
+                .position = this->camera.transform.translation,
+            })
+            .value();
+
+        FrameSubBuffer light_data = this->frame_arena
+            .add(LightData {
+                .ambient_color = this->ambient_light.color,
+                .ambient_illuminance = this->ambient_light.illuminance,
+                .point_count = static_cast<uint32_t>(this->point_lights.size()),
+                .directional_count = static_cast<uint32_t>(this->directional_lights.size()),
+            })
+            .value();
+
+        FrameSubBuffer dir_lights = this->frame_arena.add(this->directional_lights).value();
+        FrameSubBuffer point_lights = this->frame_arena.add(this->point_lights).value();
+        FrameSubBuffer instances = this->frame_arena.add(this->instances).value();
+        
+        return {
+            .view_data = view_data,
+            .light_data = light_data,
+            .dir_lights = dir_lights,
+            .point_lights = point_lights,
+            .instances = instances
+        };
     }
 
     void record_frame_commands(
@@ -791,7 +787,7 @@ private:
             .point_lights = data.point_lights.address(),
             .directional_lights = data.dir_lights.address(),
             .instances = data.instances.address(),
-            .vertices = this->static_buffer.address + this->vertices_offset,
+            .vertices = this->vertices.address(),
             .materials = this->material_manager.buffer_address(this->frame_index)
         };
         command_buffer.pushConstants<DrawConstants>(
@@ -892,9 +888,13 @@ private:
             this->pipeline_layout, 0,
             {this->texture_manager.descriptor_set()}, {}
         );
-        command_buffer.bindIndexBuffer(this->static_buffer, this->indices_offset, vk::IndexType::eUint32);
+        command_buffer.bindIndexBuffer(
+            this->static_buffer.buffer(), 
+            this->indices.buffer_offset(), 
+            vk::IndexType::eUint32
+        );
         command_buffer.drawIndexed(
-            this->index_count, 
+            this->indices.length(), 
             static_cast<uint32_t>(this->instances.size()), 
             0, 0, 0
         );
@@ -944,46 +944,6 @@ private:
         );
     }
 
-    vk::CommandBuffer begin_one_shot_commands() {
-        auto [result, command_buffer] = this->device.allocateCommandBuffers(
-            vk::CommandBufferAllocateInfo()
-                .setCommandPool(this->command_pool)
-                .setCommandBufferCount(1)
-                .setLevel(vk::CommandBufferLevel::ePrimary)
-        );
-        vk_expect(result, "Failed to create one-shot command buffer");
-        vk_expect(
-            command_buffer[0].begin(
-                vk::CommandBufferBeginInfo()
-                    .setFlags(vk::CommandBufferUsageFlagBits::eOneTimeSubmit)
-            ),
-            "Failed to begin one-shot command buffer"
-        );
-        return command_buffer[0];
-    }
-
-    void submit_one_shot_commands_sync(vk::CommandBuffer command_buffer) {
-        vk_expect(command_buffer.end(), "Failed to end one-shot command buffer");
-
-        auto [result, fence] = this->device.createFence(vk::FenceCreateInfo());
-        vk_expect(result, "Failed to create fence");
-
-        auto command_buffer_info = vk::CommandBufferSubmitInfo().setCommandBuffer(command_buffer);
-
-        vk_expect(
-            this->queue
-                .submit2(vk::SubmitInfo2().setCommandBufferInfos(command_buffer_info), fence),
-            "Failed to submit one-shot command buffer"
-        );
-        vk_expect(
-            this->device.waitForFences(fence, true, std::numeric_limits<uint64_t>::max()),
-            "Wait for fence failed"
-        );
-
-        this->device.destroyFence(fence);
-        this->device.freeCommandBuffers(this->command_pool, command_buffer);
-    }
-
     vk::Instance instance;
     vk::PhysicalDevice physical_device;
     vk::Device device;
@@ -1008,6 +968,7 @@ private:
     vk::Pipeline pipeline;
     vk::PipelineLayout pipeline_layout;
 
+    /*
     Buffer static_buffer;
     vk::DeviceAddress current_buffer_offset;
 
@@ -1017,9 +978,13 @@ private:
     vk::DeviceAddress indices_offset;
     vk::DeviceAddress indices_size;
     uint32_t index_count;
+    */
+    HeapSubBuffer<VertexData> vertices;
+    HeapSubBuffer<uint32_t> indices;
+    HeapBuffer static_buffer;
     
     Uploader uploader;
-    FrameArena frame_arena;
+    FrameArenaBuffer frame_arena;
     TextureManager texture_manager;
     MaterialManager material_manager;
     MaterialId material;
@@ -1041,7 +1006,7 @@ private:
         DirectionalLightData { 
             .direction = glm::vec3(0.3f, 1.5f, 0.6f),
             .color = glm::vec3(1.0f, 1.0f, 1.0f),
-            .illuminance = 4.0f
+            .illuminance = 2.0f
         }
     };
     std::vector<InstanceData> instances;

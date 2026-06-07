@@ -6,11 +6,11 @@
 #include <vk_mem_alloc.hpp>
 #include "image.h"
 #include "texture.h"
-#include "slotmap.h"
+#include "slot_map.h"
 #include "resource.h"
-#include "textureindices.h"
+#include "texture_indices.h"
 #include "uploader.h"
-#include "mipmap.h"
+#include "mip_map.h"
 
 enum class TextureFallback: uint8_t {
     ColorError,
@@ -32,7 +32,7 @@ public:
         uint32_t frames_in_flight,
         uint32_t max_textures
     );
-    void destroy_pending(uint64_t frame_counter);
+    void destroy_pending();
     void destroy();
     
     TextureIndices get(TextureId id, TextureFallback fallback = TextureFallback::ColorError) const;
@@ -47,17 +47,20 @@ public:
     void set(
         TextureId id,
         Uploader& uploader,
-        uint64_t frame_counter,
         const Image& image,
         TextureFallback fallback = TextureFallback::ColorError
     );
-    void request_free(TextureId id, uint64_t frame_counter);
+    void free(TextureId id);
+
+    void begin_frame(uint64_t frame_counter) {
+        this->frame_counter = frame_counter;
+    }
 
     void clear_updated() {
         this->updated.clear();
     }
 
-    void flush_mipmaps(vk::CommandBuffer command_buffer) {
+    void flush_mip_maps(vk::CommandBuffer command_buffer) {
         this->mipmap_generator.flush(command_buffer);
     }
 
@@ -117,4 +120,5 @@ private:
     Fallbacks fallbacks;
     std::deque<PendingDestroy> destroy_queue;
     uint32_t frames_in_flight;
+    uint64_t frame_counter = 0;
 };

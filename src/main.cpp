@@ -269,6 +269,7 @@ private:
         TextureId normal_map;
         TextureId aorm_map;
         TextureId displacement_map;
+        
         if (auto image = Image::load("../images/rocks.jpg"); image != std::nullopt) {
             base_color = this->renderer.add_texture(image.value());
         }
@@ -292,7 +293,7 @@ private:
                 .set_ao_roughness_metallic_map(aorm_map)
         );
         this->renderer.use_material(material);
-        this->renderer.add_mesh(generate_uv_sphere(16, 16, 0.5f));
+        this->renderer.add_mesh(generate_uv_sphere(24, 24, 0.5f));
     }
 
     void update(float delta_time) {

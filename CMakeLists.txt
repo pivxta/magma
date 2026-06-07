@@ -53,6 +53,7 @@ FetchContent_Declare(
     stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
     GIT_TAG master
+    SYSTEM
 )
 FetchContent_MakeAvailable(glfw glm spdlog tinyobjloader vmahpp stb)
 
@@ -126,24 +127,26 @@ add_executable(
     src/mesh.h
     src/image.h
     src/image.cpp
-    src/slotmap.h
+    src/slot_map.h
     src/material.h
     src/resource.h
-    src/texturemanager.h
-    src/texturemanager.cpp
-    src/textureindices.h
-    src/materialmanager.h
-    src/materialmanager.cpp
-    src/meshmanager.h
-    src/meshmanager.cpp
-    src/freelist.h
+    src/texture_manager.h
+    src/texture_manager.cpp
+    src/texture_indices.h
+    src/material_manager.h
+    src/material_manager.cpp
+    src/mesh_manager.h
+    src/mesh_manager.cpp
+    src/free_list.h
     src/arena.h
-    src/framearena.h
-    src/framearena.cpp
+    src/frame_arena_buffer.h
+    src/frame_arena_buffer.cpp
     src/uploader.h
     src/uploader.cpp
-    src/mipmap.h
-    src/mipmap.cpp
+    src/mip_map.h
+    src/mip_map.cpp
+    src/heap_buffer.h
+    src/heap_buffer.cpp
 )
 add_shaders(${PROJECT_NAME} shaders/shader.slang)
 add_compile_definitions(VULKAN_HPP_NO_EXCEPTIONS GLFW_INCLUDE_VULKAN)
