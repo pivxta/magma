@@ -11,7 +11,6 @@ FrameArena::FrameArena(
 {
     this->allocator = allocator;
     this->stride = capacity_per_fif;
-    this->frames_in_flight = frames_in_flight;
     this->buffer = create_mapped_buffer(
         device, 
         allocator, 
@@ -24,7 +23,7 @@ void FrameArena::destroy() {
     this->buffer.destroy(this->allocator);
 }
 
-void FrameArena::reset() {
-    this->frame_index = (this->frame_index + 1) % this->frames_in_flight;
+void FrameArena::begin_frame(uint32_t next_frame_index) {
+    this->frame_index = next_frame_index;
     this->arena.reset();
 }

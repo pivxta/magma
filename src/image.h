@@ -32,7 +32,14 @@ enum class ImageColorspace: uint8_t {
 
 struct ImageLoadInfo {
     ImageColorspace colorspace = ImageColorspace::Srgb;
+
+    ImageLoadInfo& set_colorspace(ImageColorspace colorspace) {
+        this->colorspace = colorspace;
+        return *this;
+    }
 };
+
+size_t get_format_pixel_size_bytes(ImageFormat format);
 
 struct Image {
     uint32_t width = 0;
@@ -86,5 +93,11 @@ struct Image {
     Image& set_auto_mip_levels() {
         this->mip_levels = std::nullopt;
         return *this;
+    }
+
+    size_t expected_size_bytes() const {
+        return static_cast<size_t>(this->width) 
+            * static_cast<size_t>(this->height)
+            * get_format_pixel_size_bytes(this->format);
     }
 };

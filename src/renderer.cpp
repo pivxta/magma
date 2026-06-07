@@ -2,7 +2,7 @@
 #include "renderer.h"
 #include "swapchain.h"
 #include "vkerror.h"
-#include "stb_image.h"
+#include "uploader.h"
 #include "target.h"
 #include "framearena.h"
 #include "camera.h"
@@ -29,7 +29,8 @@
 
 static constexpr uint32_t MAX_TEXTURES = 256;
 static constexpr uint32_t MAX_MATERIALS = 256;
-static constexpr auto FRAME_ARENA_CAPACITY_PER_FIF = vk::DeviceSize(2 * 1024 * 1024);
+static constexpr auto FRAME_ARENA_CAPACITY_PER_FIF = vk::DeviceSize(16 * 1024 * 1024);
+static constexpr auto UPLOADER_CAPACITY_PER_FIF = vk::DeviceSize(64 * 1024 * 1024);
 
 struct DrawConstants {
     vk::DeviceAddress view_data;
@@ -166,11 +167,16 @@ struct Renderer::Inner {
         this->configure_render_targets();
         this->create_sync_primitives();
         this->create_command_pool();
+        this->uploader = Uploader(
+            this->device,
+            this->allocator,
+            FRAMES_IN_FLIGHT,
+            UPLOADER_CAPACITY_PER_FIF
+        );
         this->texture_manager = TextureManager(
             this->device,
-            this->queue,
             this->allocator,
-            this->command_pool,
+            this->uploader,
             FRAMES_IN_FLIGHT,
             MAX_TEXTURES
         );
@@ -201,6 +207,7 @@ struct Renderer::Inner {
         this->destroy_sync_primitives();
         this->destroy_depth_textures();
         this->destroy_buffers();
+        this->uploader.destroy();
         this->frame_arena.destroy();
         this->texture_manager.destroy();
         this->material_manager.destroy();
@@ -219,18 +226,13 @@ struct Renderer::Inner {
     }
 
     TextureId add_texture(const Image& image) {
-        return this->texture_manager.add(
-            this->queue,
-            this->command_pool,
-            image
-        );
+        return this->texture_manager.add(this->uploader, image);
     }
 
     void set_texture(TextureId id, const Image& image) {
         this->texture_manager.set(
             id,
-            this->queue,
-            this->command_pool,
+            this->uploader,
             this->frame_counter,
             image
         );
@@ -292,7 +294,7 @@ struct Renderer::Inner {
         this->material_manager.flag_dirty_materials(this->texture_manager);
         this->material_manager.update_dirty(this->texture_manager, this->frame_index);
         this->texture_manager.clear_updated();
-        this->frame_arena.reset();
+        this->frame_arena.begin_frame(this->frame_index);
 
         vk::Extent2D viewport_size = this->swapchain.get_extent();
         auto viewport_width = static_cast<float>(viewport_size.width);
@@ -327,6 +329,8 @@ struct Renderer::Inner {
             .value();
 
         vk::CommandBuffer command_buffer = this->begin_frame_commands();
+        this->uploader.flush(command_buffer);
+        this->texture_manager.flush_mipmaps(command_buffer);
         this->record_frame_commands(command_buffer, image, FrameData{
             .view_data = view_data,
             .light_data = light_data,
@@ -346,6 +350,7 @@ struct Renderer::Inner {
 
         this->frame_counter += 1;
         this->frame_index = this->frame_counter % FRAMES_IN_FLIGHT;
+        this->uploader.begin_frame(this->frame_index);
     }
 
 private:
@@ -709,30 +714,22 @@ private:
         vk::DeviceSize indices_size = indices_count * sizeof(uint32_t);
         this->current_buffer_offset += indices_size;
 
-        vk::DeviceSize staging_size = vertices_size + indices_size;
-        Buffer staging = create_staging_buffer(
-            this->device,
-            this->allocator,
-            vk::BufferUsageFlagBits::eTransferSrc,
-            staging_size
+        this->uploader.upload_buffer(
+            BufferUpload()
+                .set_buffer(this->static_buffer)
+                .set_offset(vertices_offset)
+                .set_memory(std::span(vertices))
+                .set_dst_access_mask(vk::AccessFlagBits2::eShaderStorageRead)
+                .set_dst_stage_mask(vk::PipelineStageFlagBits2::eVertexShader)
         );
-        memcpy(staging.mapped_data, vertices.data(), vertices_size);
-        if (mesh.indices.has_value()) {
-            memcpy(
-                reinterpret_cast<uint8_t*>(staging.mapped_data) + indices_offset, 
-                mesh.indices.value().data(), 
-                indices_size
-            );
-        }
-
-        vk::CommandBuffer command_buffer = this->begin_one_shot_commands();
-        command_buffer.copyBuffer(
-            staging,
-            this->static_buffer,
-            vk::BufferCopy().setSize(staging_size)
+        this->uploader.upload_buffer(
+            BufferUpload()
+                .set_buffer(this->static_buffer)
+                .set_offset(indices_offset)
+                .set_memory(std::span(mesh.indices.value()))
+                .set_dst_access_mask(vk::AccessFlagBits2::eIndexRead)
+                .set_dst_stage_mask(vk::PipelineStageFlagBits2::eIndexInput)
         );
-        this->submit_one_shot_commands_sync(command_buffer);
-        staging.destroy(this->allocator);
 
         this->vertices_offset = vertices_offset;
         this->vertices_size = vertices_size;
@@ -1021,6 +1018,7 @@ private:
     vk::DeviceAddress indices_size;
     uint32_t index_count;
     
+    Uploader uploader;
     FrameArena frame_arena;
     TextureManager texture_manager;
     MaterialManager material_manager;

@@ -1,5 +1,4 @@
 #include "texturemanager.h"
-#include "buffer.h"
 #include "image.h"
 #include "vkerror.h"
 #include <cassert>
@@ -76,9 +75,8 @@ static vk::DescriptorSet create_set(
 
 TextureManager::TextureManager(
     vk::Device device, 
-    vk::Queue queue,
     vma::Allocator allocator,
-    vk::CommandPool command_pool,
+    Uploader& uploader,
     uint32_t frames_in_flight,
     uint32_t max_textures
 ):
@@ -92,7 +90,7 @@ TextureManager::TextureManager(
     this->desc_set_layout = create_set_layout(device, max_textures);
     this->desc_set = create_set(device, this->desc_pool, this->desc_set_layout);
     this->create_samplers(device);
-    this->create_fallbacks(queue, command_pool);
+    this->create_fallbacks(uploader);
 }
 
 void TextureManager::destroy() {
@@ -175,14 +173,13 @@ TextureId TextureManager::reserve(TextureFallback fallback) {
 }
 
 TextureId TextureManager::add(
-    vk::Queue queue,
-    vk::CommandPool pool,
+    Uploader& uploader,
     const Image& image,
     TextureFallback fallback
 ) {
     Slot slot = {
         .sampler_index = get_sampler_index(image.sampler),
-        .texture = this->create_texture(queue, pool, image),
+        .texture = this->create_texture(uploader, image),
         .fallback = this->fallbacks[get_fallback_index(fallback)]
     };
     return get_texture_id(this->slots.insert(slot).value());
@@ -190,8 +187,7 @@ TextureId TextureManager::add(
 
 void TextureManager::set(
     TextureId id,
-    vk::Queue queue,
-    vk::CommandPool pool,
+    Uploader& uploader,
     uint64_t frame_counter,
     const Image& image,
     TextureFallback fallback
@@ -205,7 +201,7 @@ void TextureManager::set(
         }
         Slot new_slot = {
             .sampler_index = get_sampler_index(image.sampler),
-            .texture = this->create_texture(queue, pool, image),
+            .texture = this->create_texture(uploader, image),
             .fallback = this->fallbacks[get_fallback_index(fallback)]
         };
         *slot = new_slot;
@@ -269,179 +265,6 @@ void submit_one_shot_commands_sync(
     device.freeCommandBuffers(pool, command_buffer);
 }
 
-void record_image_barrier(vk::CommandBuffer command_buffer, vk::ImageMemoryBarrier2 barrier) {
-    command_buffer.pipelineBarrier2(vk::DependencyInfo().setImageMemoryBarriers(barrier));
-}
-
-void record_buffer_to_image_copy(
-    vk::CommandBuffer command_buffer, 
-    const Texture& texture, 
-    const Buffer& staging
-) {
-    record_image_barrier(
-        command_buffer,
-        vk::ImageMemoryBarrier2()
-            .setImage(texture) 
-            .setSrcStageMask(vk::PipelineStageFlagBits2::eNone)
-            .setSrcAccessMask(vk::AccessFlagBits2::eNone)
-            .setDstStageMask(vk::PipelineStageFlagBits2::eTransfer)
-            .setDstAccessMask(vk::AccessFlagBits2::eTransferWrite)
-            .setOldLayout(vk::ImageLayout::eUndefined)
-            .setNewLayout(vk::ImageLayout::eTransferDstOptimal)
-            .setSubresourceRange(
-                vk::ImageSubresourceRange()
-                    .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                    .setBaseMipLevel(0)
-                    .setLevelCount(1)
-                    .setBaseArrayLayer(0)
-                    .setLayerCount(1)
-            )
-    );
-    
-    command_buffer.copyBufferToImage(
-        staging,
-        texture, 
-        vk::ImageLayout::eTransferDstOptimal,
-        {
-            vk::BufferImageCopy()
-                .setImageExtent(texture.extent)
-                .setImageSubresource(
-                    vk::ImageSubresourceLayers()
-                        .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                        .setBaseArrayLayer(0)
-                        .setLayerCount(1)
-                        .setMipLevel(0)
-                )
-        }
-    );
-}
-
-void record_image_mip_generation(
-    vk::CommandBuffer command_buffer, 
-    const Texture& texture
-) {
-    for (uint32_t mip_level = 1; mip_level < texture.mip_levels; mip_level++) {
-        record_image_barrier(
-            command_buffer,
-            vk::ImageMemoryBarrier2()
-                .setImage(texture)
-                .setSrcStageMask(vk::PipelineStageFlagBits2::eTransfer)
-                .setSrcAccessMask(vk::AccessFlagBits2::eTransferWrite)
-                .setDstStageMask(vk::PipelineStageFlagBits2::eBlit)
-                .setDstAccessMask(vk::AccessFlagBits2::eTransferRead)
-                .setOldLayout(vk::ImageLayout::eTransferDstOptimal)
-                .setNewLayout(vk::ImageLayout::eTransferSrcOptimal)
-                .setSubresourceRange(
-                    vk::ImageSubresourceRange()
-                        .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                        .setBaseMipLevel(mip_level - 1)
-                        .setLevelCount(1)
-                        .setBaseArrayLayer(0)
-                        .setLayerCount(1)
-                )
-        );
-        record_image_barrier(
-            command_buffer,
-            vk::ImageMemoryBarrier2()
-                .setImage(texture)
-                .setSrcStageMask(vk::PipelineStageFlagBits2::eTransfer)
-                .setSrcAccessMask(vk::AccessFlagBits2::eNone)
-                .setDstStageMask(vk::PipelineStageFlagBits2::eBlit)
-                .setDstAccessMask(vk::AccessFlagBits2::eTransferWrite)
-                .setOldLayout(vk::ImageLayout::eUndefined)
-                .setNewLayout(vk::ImageLayout::eTransferDstOptimal)
-                .setSubresourceRange(
-                    vk::ImageSubresourceRange()
-                        .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                        .setBaseMipLevel(mip_level)
-                        .setLevelCount(1)
-                        .setBaseArrayLayer(0)
-                        .setLayerCount(1)
-                )
-        );
-
-        auto src_width = int32_t(std::max(texture.extent.width >> (mip_level - 1), 1u));
-        auto src_height = int32_t(std::max(texture.extent.height >> (mip_level - 1), 1u));
-        auto dst_width = int32_t(std::max(texture.extent.width >> mip_level, 1u));
-        auto dst_height = int32_t(std::max(texture.extent.height >> mip_level, 1u));
-
-        std::array<vk::Offset3D, 2> src_offsets = {
-            vk::Offset3D(0, 0, 0), 
-            vk::Offset3D(src_width, src_height, 1)
-        };
-        auto src_subresource = vk::ImageSubresourceLayers()
-            .setAspectMask(vk::ImageAspectFlagBits::eColor)
-            .setBaseArrayLayer(0)
-            .setLayerCount(1)
-            .setMipLevel(mip_level - 1);
-
-        std::array<vk::Offset3D, 2> dst_offsets = {
-            vk::Offset3D(0, 0, 0), 
-            vk::Offset3D(dst_width, dst_height, 1)
-        };
-        auto dst_subresource = vk::ImageSubresourceLayers()
-            .setAspectMask(vk::ImageAspectFlagBits::eColor)
-            .setBaseArrayLayer(0)
-            .setLayerCount(1)
-            .setMipLevel(mip_level);
-        auto regions = vk::ImageBlit2()
-            .setSrcSubresource(src_subresource)
-            .setSrcOffsets(src_offsets)
-            .setDstSubresource(dst_subresource)
-            .setDstOffsets(dst_offsets);
-
-        command_buffer.blitImage2(
-            vk::BlitImageInfo2()
-                .setSrcImage(texture)   
-                .setSrcImageLayout(vk::ImageLayout::eTransferSrcOptimal)
-                .setDstImage(texture)   
-                .setDstImageLayout(vk::ImageLayout::eTransferDstOptimal)
-                .setFilter(vk::Filter::eLinear)
-                .setRegions(regions)
-        );
-
-        record_image_barrier(
-            command_buffer,
-            vk::ImageMemoryBarrier2()
-                .setImage(texture)
-                .setSrcStageMask(vk::PipelineStageFlagBits2::eBlit)
-                .setSrcAccessMask(vk::AccessFlagBits2::eTransferRead)
-                .setDstStageMask(vk::PipelineStageFlagBits2::eFragmentShader)
-                .setDstAccessMask(vk::AccessFlagBits2::eShaderSampledRead)
-                .setOldLayout(vk::ImageLayout::eTransferSrcOptimal)
-                .setNewLayout(vk::ImageLayout::eShaderReadOnlyOptimal)
-                .setSubresourceRange(
-                    vk::ImageSubresourceRange()
-                        .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                        .setBaseMipLevel(mip_level - 1)
-                        .setLevelCount(1)
-                        .setBaseArrayLayer(0)
-                        .setLayerCount(1)
-                )
-        );
-    }
-
-    record_image_barrier(
-        command_buffer,
-        vk::ImageMemoryBarrier2()
-            .setImage(texture)
-            .setSrcStageMask(vk::PipelineStageFlagBits2::eBlit)
-            .setSrcAccessMask(vk::AccessFlagBits2::eTransferWrite)
-            .setDstStageMask(vk::PipelineStageFlagBits2::eFragmentShader)
-            .setDstAccessMask(vk::AccessFlagBits2::eShaderSampledRead)
-            .setOldLayout(vk::ImageLayout::eTransferDstOptimal)
-            .setNewLayout(vk::ImageLayout::eShaderReadOnlyOptimal)
-            .setSubresourceRange(
-                vk::ImageSubresourceRange()
-                    .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                    .setBaseMipLevel(texture.mip_levels - 1)
-                    .setLevelCount(1)
-                    .setBaseArrayLayer(0)
-                    .setLayerCount(1)
-            )
-    );
-}
-
 static vk::Format get_image_format(ImageFormat image_format) {
     vk::Format format = vk::Format::eUndefined;
     switch (image_format) {
@@ -456,11 +279,9 @@ static vk::Format get_image_format(ImageFormat image_format) {
     return format;
 }
 
-static Texture upload_into_texture(
+static Texture create_texture_from_image(
     vk::Device device, 
-    vk::Queue queue,
     vma::Allocator allocator,
-    vk::CommandPool command_pool, 
     const Image& src
 ) {
     vk::Extent3D extent = vk::Extent3D(src.width, src.height, 1);
@@ -468,7 +289,7 @@ static Texture upload_into_texture(
     uint32_t max_mip_levels = static_cast<uint32_t>(std::log2(std::max(src.width, src.height))) + 1;
     uint32_t mip_levels = src.mip_levels.value_or(max_mip_levels);
 
-    Texture texture = create_texture(
+    return create_texture(
         device,
         allocator,
         vk::ImageCreateInfo()
@@ -485,36 +306,25 @@ static Texture upload_into_texture(
             .setSharingMode(vk::SharingMode::eExclusive)
             .setTiling(vk::ImageTiling::eOptimal)
     );
-
-    auto staging = create_staging_buffer(
-        device, 
-        allocator, 
-        vk::BufferUsageFlagBits::eTransferSrc,
-        src.bytes.size()
-    );
-    memcpy(staging.mapped_data, src.bytes.data(), src.bytes.size());
-    vk::CommandBuffer command_buffer = begin_one_shot_commands(device, command_pool);
-    record_buffer_to_image_copy(command_buffer, texture, staging);
-    record_image_mip_generation(command_buffer, texture);
-    submit_one_shot_commands_sync(device, queue, command_pool, command_buffer);
-    staging.destroy(allocator);
-
-    return texture;
 }
 
 std::optional<SlotKey<Texture>> TextureManager::create_texture(
-    vk::Queue queue,
-    vk::CommandPool command_pool, 
-    const Image& src
+    Uploader& uploader,
+    const Image& image
 ) {
     if (auto key = this->textures.reserve(); key.has_value()) {
-        Texture texture = upload_into_texture(
-            device,
-            queue,
-            allocator,
-            command_pool,
-            src
+        Texture texture = create_texture_from_image(
+            this->device,
+            this->allocator,
+            image
         );
+        uploader.upload_image(
+            ImageUpload()
+                .set_texture(texture)
+                .set_image(image)
+        );
+        this->mipmap_generator.generate(texture);
+
         auto info = vk::DescriptorImageInfo()
             .setImageView(texture.view)
             .setImageLayout(vk::ImageLayout::eShaderReadOnlyOptimal);
@@ -694,7 +504,7 @@ static Image create_fallback_image(TextureFallback type) {
     return {};
 }
 
-void TextureManager::create_fallbacks(vk::Queue queue, vk::CommandPool command_pool) {
+void TextureManager::create_fallbacks(Uploader& uploader) {
     std::array types = {
         TextureFallback::ColorWhite,
         TextureFallback::ColorError,
@@ -704,6 +514,6 @@ void TextureManager::create_fallbacks(vk::Queue queue, vk::CommandPool command_p
     for (auto type: types) {
         uint32_t index = get_fallback_index(type);
         Image image = create_fallback_image(type);
-        this->fallbacks[index] = this->create_texture(queue, command_pool, image).value();
+        this->fallbacks[index] = this->create_texture(uploader, image).value();
     }
 }

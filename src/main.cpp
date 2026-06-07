@@ -270,25 +270,18 @@ private:
         TextureId aorm_map;
         TextureId displacement_map;
         if (auto image = Image::load("../images/rocks.jpg"); image != std::nullopt) {
-            base_color = this->renderer.add_texture(image->set_sampler(Sampler::LinearRepeat));
+            base_color = this->renderer.add_texture(image.value());
         }
-        if (auto image = Image::load("../images/rocksaorm.png"); image != std::nullopt) {
-            aorm_map = this->renderer.add_texture(
-                image->set_sampler(Sampler::LinearRepeat)
-                    .set_format(ImageFormat::Rgba8)
-            );
+
+        auto linear_load = ImageLoadInfo().set_colorspace(ImageColorspace::Linear);
+        if (auto image = Image::load("../images/rocksaorm.png", linear_load); image != std::nullopt) {
+            aorm_map = this->renderer.add_texture(image.value());
         }
-        if (auto image = Image::load("../images/rocksnormal.jpg"); image != std::nullopt) {
-            normal_map = this->renderer.add_texture(
-                image->set_sampler(Sampler::LinearRepeat)
-                    .set_format(ImageFormat::Rgba8)
-            );
+        if (auto image = Image::load("../images/rocksnormal.jpg", linear_load); image != std::nullopt) {
+            normal_map = this->renderer.add_texture(image.value());
         }
-        if (auto image = Image::load("../images/rocksdisplacement.jpg"); image != std::nullopt) {
-            displacement_map = this->renderer.add_texture(
-                image->set_sampler(Sampler::LinearRepeat)
-                    .set_format(ImageFormat::R8)
-            );
+        if (auto image = Image::load("../images/rocksdisplacement.jpg", linear_load); image != std::nullopt) {
+            displacement_map = this->renderer.add_texture(image.value());
         }
         
         MaterialId material = this->renderer.add_material(

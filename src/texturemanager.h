@@ -9,6 +9,8 @@
 #include "slotmap.h"
 #include "resource.h"
 #include "textureindices.h"
+#include "uploader.h"
+#include "mipmap.h"
 
 enum class TextureFallback: uint8_t {
     ColorError,
@@ -25,9 +27,8 @@ public:
 
     TextureManager(
         vk::Device device, 
-        vk::Queue queue,
         vma::Allocator allocator,
-        vk::CommandPool command_pool,
+        Uploader& uploader,
         uint32_t frames_in_flight,
         uint32_t max_textures
     );
@@ -39,15 +40,13 @@ public:
 
     TextureId reserve(TextureFallback fallback = TextureFallback::ColorError);
     TextureId add(
-        vk::Queue queue,
-        vk::CommandPool pool,
+        Uploader& uploader,
         const Image& image,
         TextureFallback fallback = TextureFallback::ColorError
     );
     void set(
         TextureId id,
-        vk::Queue queue,
-        vk::CommandPool pool,
+        Uploader& uploader,
         uint64_t frame_counter,
         const Image& image,
         TextureFallback fallback = TextureFallback::ColorError
@@ -56,6 +55,10 @@ public:
 
     void clear_updated() {
         this->updated.clear();
+    }
+
+    void flush_mipmaps(vk::CommandBuffer command_buffer) {
+        this->mipmap_generator.flush(command_buffer);
     }
 
     const std::vector<TextureId>& get_updated() const {
@@ -71,16 +74,12 @@ public:
     }
     
 private:
-    void create_fallbacks(vk::Queue queue, vk::CommandPool command_pool);
+    void create_fallbacks(Uploader& uploader);
     void create_samplers(vk::Device device);
     void bind_samplers(vk::Device device, vk::DescriptorSet set, std::span<Sampler> types);
     void destroy_samplers(vk::Device device);
 
-    std::optional<SlotKey<Texture>> create_texture(
-        vk::Queue queue, 
-        vk::CommandPool pool, 
-        const Image& image
-    );
+    std::optional<SlotKey<Texture>> create_texture(Uploader& uploader, const Image& image);
     void destroy_texture(SlotKey<Texture> key);
 
     struct Slot {
@@ -108,6 +107,8 @@ private:
     vk::DescriptorPool desc_pool;
     vk::DescriptorSetLayout desc_set_layout;
     vk::DescriptorSet desc_set;
+
+    MipmapGenerator mipmap_generator;
 
     std::vector<TextureId> updated;
     SlotMap<Slot> slots;

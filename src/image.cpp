@@ -3,6 +3,23 @@
 #include <stb_image.h>
 #include "image.h"
 
+size_t get_format_pixel_size_bytes(ImageFormat format) {
+    switch (format) {
+        case ImageFormat::R8:
+        case ImageFormat::R8Srgb:
+            return 1;
+        case ImageFormat::Rg8:
+        case ImageFormat::Rg8Srgb:
+            return 2;
+        case ImageFormat::Rgba8:
+        case ImageFormat::Rgba8Srgb:
+            return 4;
+        case ImageFormat::Undefined:
+            return 1;
+    }
+    return 0;
+}
+
 static ImageFormat get_image_format(int byte_components, ImageColorspace colorspace) {
     assert(byte_components > 0 && byte_components != 3 && byte_components <= 4);
     ImageFormat format = ImageFormat::Undefined;

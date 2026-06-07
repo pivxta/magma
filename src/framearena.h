@@ -124,13 +124,12 @@ public:
         return allocation;
     }
 
-    void reset();
+    void begin_frame(uint32_t next_frame_index);
 
 private:
     vma::Allocator allocator;
 
     uint32_t frame_index = 0;
-    uint32_t frames_in_flight = 0;
 
     Buffer buffer;
     vk::DeviceSize stride = 0;

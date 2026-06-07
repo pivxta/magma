@@ -114,7 +114,9 @@ add_executable(
     src/renderer.cpp
     src/renderer.h
     src/target.h
+    src/buffer.cpp
     src/buffer.h
+    src/texture.cpp
     src/texture.h
     src/swapchain.cpp
     src/swapchain.h
@@ -140,6 +142,8 @@ add_executable(
     src/framearena.cpp
     src/uploader.h
     src/uploader.cpp
+    src/mipmap.h
+    src/mipmap.cpp
 )
 add_shaders(${PROJECT_NAME} shaders/shader.slang)
 add_compile_definitions(VULKAN_HPP_NO_EXCEPTIONS GLFW_INCLUDE_VULKAN)
