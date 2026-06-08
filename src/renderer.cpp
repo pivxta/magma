@@ -851,12 +851,21 @@ private:
             {this->texture_manager.descriptor_set()}, {}
         );
         command_buffer.bindIndexBuffer(this->mesh_manager.index_buffer(), 0, vk::IndexType::eUint32);
+        MeshData mesh = this->mesh_manager.get(this->mesh);
+        command_buffer.drawIndexed(
+            mesh.index_count,
+            static_cast<uint32_t>(data.instances.length()),
+            mesh.index_offset,
+            0, 0
+        );
+        /*
         command_buffer.drawIndexedIndirect(
             data.draw_commands.buffer(), 
             data.draw_commands.buffer_offset(),
             static_cast<uint32_t>(data.draw_commands.length()),
             sizeof(vk::DrawIndexedIndirectCommand)
         );
+        */
         command_buffer.endRendering();
     }
 

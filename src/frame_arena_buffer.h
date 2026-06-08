@@ -77,7 +77,7 @@ private:
     vk::DeviceAddress base_address = 0;
     vk::DeviceSize base_offset = 0;
     vk::DeviceSize elem_count = 0;
-    void* mapped_data = 0;
+    void* mapped_data = nullptr;
 
     ArenaAllocation<vk::DeviceSize> local_range;
 };

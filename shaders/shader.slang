@@ -49,9 +49,8 @@ VertexOutput vertexMain(
     uint instance_id: SV_InstanceID,
     uint vertex_id: SV_VertexID
 ) {
-    Draw draw = constants.draws[draw_id];
-    Instance instance = constants.instances[instance_id];
-    Vertex vertex = draw.vertices[vertex_id];
+    Instance instance = constants.instances[constants.draws[draw_id].instance_offset + instance_id];
+    Vertex vertex = constants.draws[draw_id].vertices[vertex_id];
     var world_position = float3(mul(instance.local_to_world, float4(vertex.position, 1.0)));
     var world_normal = float3(mul(instance.local_to_world, float4(vertex.normal, 0.0)));
     var world_tangent = float3(mul(instance.local_to_world, float4(vertex.tangent.xyz, 0.0)));
