@@ -56,7 +56,7 @@ SlotKey<MeshManager::MeshSubBuffers> MeshManager::get_slot_key(MeshId id) {
 }
 
 MeshId MeshManager::reserve() {
-    SlotKey<MeshSubBuffers> key = this->meshes.reserve().value();
+    SlotKey<MeshSubBuffers> key = this->meshes.insert({}).value();
     return MeshId{
         .index = key.index,
         .generation = key.generation

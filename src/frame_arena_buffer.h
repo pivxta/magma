@@ -14,7 +14,7 @@ public:
     }
 
     vk::DeviceSize buffer_offset() const {
-        return this->local_range.offset;
+        return this->base_offset;
     }
 
     vk::DeviceSize length() const {
