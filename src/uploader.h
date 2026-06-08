@@ -5,7 +5,7 @@
 #include "arena.h"
 
 struct BufferUpload {
-    Buffer buffer;
+    const Buffer* buffer;
     vk::DeviceSize offset = 0;
     vk::AccessFlags2 dst_access_mask = {};
     vk::PipelineStageFlags2 dst_stage_mask = {};
@@ -13,8 +13,8 @@ struct BufferUpload {
     const void* memory = nullptr;
     size_t size = 0;
 
-    BufferUpload& set_buffer(Buffer buffer) {
-        this->buffer = buffer;
+    BufferUpload& set_buffer(const Buffer& buffer) {
+        this->buffer = &buffer;
         return *this;
     }
 
@@ -52,16 +52,23 @@ struct BufferUpload {
         this->size = memory.size_bytes();
         return *this;
     }
+
+    template<typename T>
+    BufferUpload& set_memory(const std::vector<T>& memory) {
+        this->memory = memory.data();
+        this->size = memory.size() * sizeof(T);
+        return *this;
+    }
 };
 
 struct ImageUpload {
-    Texture texture;
+    const Texture* texture;
     const Image* image = nullptr;
     vk::Offset3D offset = vk::Offset3D(0, 0, 0);
     vk::Extent3D extent = vk::Extent3D(0, 0, 0);
 
-    ImageUpload& set_texture(Texture texture) {
-        this->texture = texture;
+    ImageUpload& set_texture(const Texture& texture) {
+        this->texture = &texture;
         this->extent = texture.extent;
         return *this;
     }

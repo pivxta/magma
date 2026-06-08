@@ -30,7 +30,10 @@ public:
     void free_material(MaterialId id);
     void use_material(MaterialId id);
 
-    void add_mesh(const Mesh& mesh);
+    MeshId add_mesh(const Mesh& mesh);
+    void set_mesh(MeshId id, const Mesh& mesh);
+    void free_mesh(MeshId id);
+    void use_mesh(MeshId id);
 
     void draw_frame();
 

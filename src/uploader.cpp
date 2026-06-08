@@ -23,7 +23,9 @@ void Uploader::destroy() {
 }
 
 bool Uploader::upload_buffer(BufferUpload upload) {
-    if (upload.size + upload.offset > upload.buffer.size) {
+    assert(upload.buffer != nullptr);
+
+    if (upload.size + upload.offset > upload.buffer->size) {
         spdlog::error("Buffer not big enough for upload");
         return false;
     }
@@ -33,9 +35,10 @@ bool Uploader::upload_buffer(BufferUpload upload) {
         return false;
     }
 
-    if (upload.buffer.mapped_data != nullptr) {
-        memcpy(upload.buffer.mapped(upload.offset), upload.memory, upload.size);
-        upload.buffer.flush(this->allocator, 0, upload.size);
+    Buffer buffer = *upload.buffer;
+    if (buffer.mapped_data != nullptr) {
+        memcpy(buffer.mapped(upload.offset), upload.memory, upload.size);
+        buffer.flush(this->allocator, upload.offset, upload.size);
         return true;
     }
 
@@ -49,7 +52,7 @@ bool Uploader::upload_buffer(BufferUpload upload) {
     this->buffer.flush(this->allocator, buffer_offset, upload.size);
 
     this->pending_buffers.push_back(PendingBufferUpload{
-        .buffer = upload.buffer,
+        .buffer = buffer,
         .size = upload.size,
         .offset = upload.offset,
         .dst_access_mask = upload.dst_access_mask,
@@ -61,6 +64,7 @@ bool Uploader::upload_buffer(BufferUpload upload) {
 }
 
 bool Uploader::upload_image(ImageUpload upload) {
+    assert(upload.texture != nullptr);
     assert(upload.image != nullptr);
 
     if (upload.image->bytes.size() < upload.image->expected_size_bytes()) {
@@ -79,7 +83,7 @@ bool Uploader::upload_image(ImageUpload upload) {
     this->buffer.flush(this->allocator, buffer_offset, size);
 
     this->pending_images.push_back(PendingImageUpload{
-        .texture = upload.texture,
+        .texture = *upload.texture,
         .extent = upload.extent,
         .offset = upload.offset,
         .staging_range = staging_range.value(),

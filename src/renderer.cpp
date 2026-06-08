@@ -4,16 +4,14 @@
 #include "vk_error.h"
 #include "uploader.h"
 #include "target.h"
-#include "heap_buffer.h"
 #include "frame_arena_buffer.h"
 #include "camera.h"
 #include "image.h"
 #include "mesh.h"
 #include "texture.h"
-#include "buffer.h"
 #include "texture_manager.h"
 #include "material_manager.h"
-#include "time.h"
+#include "mesh_manager.h"
 #include <vector>
 #include <optional>
 #include <iostream>
@@ -32,46 +30,18 @@ static constexpr uint32_t MAX_TEXTURES = 4096;
 static constexpr uint32_t MAX_MATERIALS = 2048;
 static constexpr auto FRAME_ARENA_CAPACITY_PER_FIF = vk::DeviceSize(16 * 1024 * 1024);
 static constexpr auto UPLOADER_CAPACITY_PER_FIF = vk::DeviceSize(64 * 1024 * 1024);
+static constexpr auto VERTEX_HEAP_CAPACITY = vk::DeviceSize(128 * 1024 * 1024);
+static constexpr auto INDEX_HEAP_CAPACITY = vk::DeviceSize(64 * 1024 * 1024);
 
 struct DrawConstants {
     vk::DeviceAddress view_data;
     vk::DeviceAddress light_data;
     vk::DeviceAddress point_lights;
     vk::DeviceAddress directional_lights;
-    vk::DeviceAddress instances;
-    vk::DeviceAddress vertices;
     vk::DeviceAddress materials;
+    vk::DeviceAddress instances;
+    vk::DeviceAddress draws;
 };
-
-struct VertexData {
-    glm::vec3 position;
-    glm::vec3 normal;
-    glm::vec4 tangent;
-    glm::vec2 tex_coords;
-};
-
-static std::optional<std::vector<VertexData>> interlace_mesh_attributes(const Mesh& mesh) {
-    if (mesh.positions.size() != mesh.normals.size()
-        || mesh.positions.size() != mesh.tex_coords.size()
-        || mesh.positions.size() != mesh.tangents.size())
-    {
-        spdlog::error("Failed to load mesh, the length of the vertex attribute arrays must the same for all attributes");
-        return std::nullopt;
-    }
-
-    std::vector<VertexData> vertices;
-    vertices.reserve(mesh.positions.size());
-    for (size_t i = 0; i < mesh.positions.size(); i++) {
-        vertices.push_back({
-            .position = mesh.positions[i],
-            .normal = mesh.normals[i],
-            .tangent = mesh.tangents[i],
-            .tex_coords = mesh.tex_coords[i]
-        });
-    }
-
-    return vertices;
-}
 
 struct InstanceData {
     glm::mat4x3 local_to_world;
@@ -119,12 +89,19 @@ struct LightData {
     uint32_t directional_count;
 };
 
+struct DrawData {
+    vk::DeviceAddress vertices;
+    uint32_t instance_offset;
+};
+
 struct FrameData {
     FrameSubBuffer<ViewData> view_data;
     FrameSubBuffer<LightData> light_data;
     FrameSubBuffer<DirectionalLightData> dir_lights;
     FrameSubBuffer<PointLightData> point_lights;
     FrameSubBuffer<InstanceData> instances;
+    FrameSubBuffer<DrawData> draws;
+    FrameSubBuffer<vk::DrawIndexedIndirectCommand> draw_commands;
 };
 
 static inline std::vector<uint32_t> read_spirv_file(const std::filesystem::path& path) {
@@ -186,10 +163,18 @@ struct Renderer::Inner {
             FRAMES_IN_FLIGHT,
             MAX_MATERIALS
         );
+        this->mesh_manager = MeshManager(
+            this->device,
+            this->allocator,
+            FRAMES_IN_FLIGHT,
+            VERTEX_HEAP_CAPACITY,
+            INDEX_HEAP_CAPACITY
+        );
         this->frame_arena = FrameArenaBuffer(
             this->device,
             this->allocator,
-            vk::BufferUsageFlagBits::eStorageBuffer,
+            vk::BufferUsageFlagBits::eStorageBuffer
+                | vk::BufferUsageFlagBits::eIndirectBuffer,
             FRAMES_IN_FLIGHT,
             FRAME_ARENA_CAPACITY_PER_FIF
         );
@@ -206,11 +191,11 @@ struct Renderer::Inner {
         this->device.destroyCommandPool(this->command_pool);
         this->destroy_sync_primitives();
         this->destroy_depth_textures();
-        this->destroy_buffers();
         this->uploader.destroy();
         this->frame_arena.destroy();
         this->texture_manager.destroy();
         this->material_manager.destroy();
+        this->mesh_manager.destroy();
         this->allocator.destroy();
         this->swapchain.destroy(this->device);
         this->device.destroy();
@@ -257,8 +242,20 @@ struct Renderer::Inner {
         this->material = id;
     }
     
-    void add_mesh(const Mesh& mesh) {
-        this->create_mesh_buffers(mesh);
+    MeshId add_mesh(const Mesh& mesh) {
+        return this->mesh_manager.add(this->uploader, mesh);
+    }
+
+    void set_mesh(MeshId id, const Mesh& mesh) {
+        this->mesh_manager.set(id, this->uploader, mesh);
+    }
+
+    void free_mesh(MeshId id) {
+        this->mesh_manager.free(id);
+    }
+
+    void use_mesh(MeshId id) {
+        this->mesh = id;
     }
 
     void draw_frame() {
@@ -286,7 +283,7 @@ struct Renderer::Inner {
             vk_expect(result1, "Critical swapchain image acquisition failure");
         }
 
-        this->static_buffer.free_pending();
+        this->mesh_manager.free_pending();
         this->texture_manager.destroy_pending();
         this->material_manager.flag_dirty_materials(this->texture_manager);
         this->material_manager.update_dirty(this->texture_manager, this->frame_index);
@@ -312,9 +309,9 @@ struct Renderer::Inner {
         this->frame_index = this->frame_counter % FRAMES_IN_FLIGHT;
 
         this->uploader.begin_frame(this->frame_index);
-        this->texture_manager.begin_frame(this->frame_counter);
         this->frame_arena.begin_frame(this->frame_index);
-        this->static_buffer.begin_frame(this->frame_counter);
+        this->texture_manager.begin_frame(this->frame_counter);
+        this->mesh_manager.begin_frame(this->frame_counter);
     }
 
 private:
@@ -424,6 +421,7 @@ private:
                     .setSynchronization2(true),
                 
                 vk::PhysicalDeviceVulkan12Features()
+                    .setDrawIndirectCount(true)
                     .setScalarBlockLayout(true)
                     .setBufferDeviceAddress(true)
                     .setDescriptorIndexing(true)
@@ -579,10 +577,7 @@ private:
         };
         auto dyn_state = vk::PipelineDynamicStateCreateInfo().setDynamicStates(dynamic_states);
 
-        std::array set_layouts = {
-            //this->frame_set_layout,
-            this->texture_manager.descriptor_set_layout(),
-        };
+        std::array set_layouts = {this->texture_manager.descriptor_set_layout()};
         std::array push_constant_ranges = {
             vk::PushConstantRange()
                 .setOffset(0)
@@ -660,42 +655,6 @@ private:
         }
     }
 
-    void create_mesh_buffers(const Mesh& mesh) {
-        std::vector<VertexData> vertices;
-        if (auto mesh_vertices = interlace_mesh_attributes(mesh); mesh_vertices != std::nullopt) {
-            vertices = std::move(*mesh_vertices);
-        } else {
-            return;
-        }
-
-        HeapSubBuffer<VertexData> vertices_sub = this->static_buffer
-            .allocate<VertexData>(vertices.size())
-            .value();
-        HeapSubBuffer<uint32_t> indices_sub = this->static_buffer
-            .allocate<uint32_t>(mesh.indices.value().size())
-            .value();
-
-        this->uploader.upload_buffer(
-            BufferUpload()
-                .set_buffer(this->static_buffer.buffer())
-                .set_offset(vertices_sub.buffer_offset())
-                .set_memory(std::span(vertices))
-                .set_dst_access_mask(vk::AccessFlagBits2::eShaderStorageRead)
-                .set_dst_stage_mask(vk::PipelineStageFlagBits2::eVertexShader)
-        );
-        this->uploader.upload_buffer(
-            BufferUpload()
-                .set_buffer(this->static_buffer.buffer())
-                .set_offset(indices_sub.buffer_offset())
-                .set_memory(std::span(mesh.indices.value()))
-                .set_dst_access_mask(vk::AccessFlagBits2::eIndexRead)
-                .set_dst_stage_mask(vk::PipelineStageFlagBits2::eIndexInput)
-        );
-
-        this->vertices = vertices_sub;
-        this->indices = indices_sub;
-    }
-
     void create_buffers() {
         const int layers = 1;
         const int rows = 32;
@@ -715,27 +674,6 @@ private:
                 }
             }
         }
-
-        this->static_buffer = HeapBuffer(
-            this->device,
-            this->allocator,
-            FRAMES_IN_FLIGHT,
-            256,
-            vk::BufferCreateInfo()
-                .setSharingMode(vk::SharingMode::eExclusive)
-                .setSize(vk::DeviceSize(16 * 1024 * 1024))
-                .setUsage(
-                    vk::BufferUsageFlagBits::eShaderDeviceAddress
-                        | vk::BufferUsageFlagBits::eTransferDst
-                        | vk::BufferUsageFlagBits::eIndexBuffer
-                ),
-            vma::AllocationCreateInfo()
-                .setUsage(vma::MemoryUsage::eGpuOnly)
-        );
-    }
-
-    void destroy_buffers() {
-        this->static_buffer.destroy();
     }
 
     Texture create_image(const vk::ImageCreateInfo& info) {
@@ -766,13 +704,33 @@ private:
         FrameSubBuffer dir_lights = this->frame_arena.add(this->directional_lights).value();
         FrameSubBuffer point_lights = this->frame_arena.add(this->point_lights).value();
         FrameSubBuffer instances = this->frame_arena.add(this->instances).value();
+
+        MeshData mesh = this->mesh_manager.get(this->mesh);
+
+        FrameSubBuffer draws = this->frame_arena.add(std::vector{
+            DrawData {
+                .vertices = mesh.vertices_address,
+                .instance_offset = 0
+            }
+        }).value();
+
+        FrameSubBuffer draw_commands = this->frame_arena.add(std::vector{
+            vk::DrawIndexedIndirectCommand()
+                .setFirstIndex(mesh.index_offset)
+                .setIndexCount(mesh.index_count)
+                .setFirstInstance(0)
+                .setInstanceCount(instances.length())
+                .setVertexOffset(0)
+        }).value();
         
         return {
             .view_data = view_data,
             .light_data = light_data,
             .dir_lights = dir_lights,
             .point_lights = point_lights,
-            .instances = instances
+            .instances = instances,
+            .draws = draws,
+            .draw_commands = draw_commands,
         };
     }
 
@@ -786,9 +744,9 @@ private:
             .light_data = data.light_data.address(),
             .point_lights = data.point_lights.address(),
             .directional_lights = data.dir_lights.address(),
+            .materials = this->material_manager.buffer_address(this->frame_index),
             .instances = data.instances.address(),
-            .vertices = this->vertices.address(),
-            .materials = this->material_manager.buffer_address(this->frame_index)
+            .draws = data.draws.address()
         };
         command_buffer.pushConstants<DrawConstants>(
             this->pipeline_layout,
@@ -837,7 +795,7 @@ private:
                 .setNewLayout(vk::ImageLayout::eColorAttachmentOptimal)
                 .setSubresourceRange(subresource_range)
         );
-        this->record_draw_commands(command_buffer, image);
+        this->record_draw_commands(command_buffer, image, data);
         this->record_image_barrier(
             command_buffer,
             vk::ImageMemoryBarrier2()
@@ -852,7 +810,11 @@ private:
         );
     }
 
-    void record_draw_commands(vk::CommandBuffer command_buffer, const SwapchainImage& image) {
+    void record_draw_commands(
+        vk::CommandBuffer command_buffer, 
+        const SwapchainImage& image,
+        const FrameData& data
+    ) {
         glm::vec3 ambient_color = this->ambient_light.color * this->ambient_light.illuminance; 
         auto color_attachment = vk::RenderingAttachmentInfo()
             .setImageView(image.view)
@@ -888,15 +850,12 @@ private:
             this->pipeline_layout, 0,
             {this->texture_manager.descriptor_set()}, {}
         );
-        command_buffer.bindIndexBuffer(
-            this->static_buffer.buffer(), 
-            this->indices.buffer_offset(), 
-            vk::IndexType::eUint32
-        );
-        command_buffer.drawIndexed(
-            this->indices.length(), 
-            static_cast<uint32_t>(this->instances.size()), 
-            0, 0, 0
+        command_buffer.bindIndexBuffer(this->mesh_manager.index_buffer(), 0, vk::IndexType::eUint32);
+        command_buffer.drawIndexedIndirect(
+            data.draw_commands.buffer(), 
+            data.draw_commands.buffer_offset(),
+            static_cast<uint32_t>(data.draw_commands.length()),
+            sizeof(vk::DrawIndexedIndirectCommand)
         );
         command_buffer.endRendering();
     }
@@ -968,26 +927,13 @@ private:
     vk::Pipeline pipeline;
     vk::PipelineLayout pipeline_layout;
 
-    /*
-    Buffer static_buffer;
-    vk::DeviceAddress current_buffer_offset;
-
-    vk::DeviceAddress vertices_offset;
-    vk::DeviceAddress vertices_size;
-    uint32_t vertex_count;
-    vk::DeviceAddress indices_offset;
-    vk::DeviceAddress indices_size;
-    uint32_t index_count;
-    */
-    HeapSubBuffer<VertexData> vertices;
-    HeapSubBuffer<uint32_t> indices;
-    HeapBuffer static_buffer;
-    
     Uploader uploader;
     FrameArenaBuffer frame_arena;
     TextureManager texture_manager;
     MaterialManager material_manager;
+    MeshManager mesh_manager;
     MaterialId material;
+    MeshId mesh;
 
     Camera camera;
     AmbientLightData ambient_light = {
@@ -1067,8 +1013,20 @@ void Renderer::free_texture(TextureId id) {
     return this->inner->free_texture(id);
 }
 
-void Renderer::add_mesh(const Mesh& mesh) {
+MeshId Renderer::add_mesh(const Mesh& mesh) {
     return this->inner->add_mesh(mesh);
+}
+
+void Renderer::set_mesh(MeshId id, const Mesh& mesh) {
+    this->inner->set_mesh(id, mesh);
+}
+
+void Renderer::free_mesh(MeshId id) {
+    this->inner->free_mesh(id);
+}
+
+void Renderer::use_mesh(MeshId id) {
+    this->inner->use_mesh(id);
 }
 
 void Renderer::set_camera(const Camera& camera) {

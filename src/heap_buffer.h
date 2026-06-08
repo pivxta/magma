@@ -10,6 +10,11 @@ template<typename T>
 requires std::is_trivially_copyable_v<T>
 struct HeapSubBuffer {
 public:
+    const Buffer& buffer() const {
+        assert(this->parent_buffer != nullptr);
+        return *this->parent_buffer;
+    }
+
     vk::DeviceSize buffer_offset() const {
         return this->local_range.offset;
     }
@@ -31,10 +36,17 @@ public:
     }
 
     void write_mapped(const T& memory, vk::DeviceSize first = 0) {
+        assert(this->mapped_data != nullptr);
+        assert(first < this->elem_count);
+
         memcpy(this->mapped() + first, &memory, sizeof(T));
     }
     
     void write_mapped(std::span<const T> memory, vk::DeviceSize first = 0) {
+        assert(this->mapped_data != nullptr);
+        assert(first <= this->elem_count);
+        assert(memory.size() <= this->elem_count - first);
+
         memcpy(this->mapped() + first, memory.data(), memory.size_bytes());
     }
 
@@ -43,25 +55,29 @@ public:
         vk::DeviceSize first = 0,
         std::optional<vk::DeviceSize> count = std::nullopt
     ) {
-        vk::DeviceSize flush_size = this->local_range.size;
-        if (count.has_value()) {
-            flush_size = count.value() * sizeof(T);
-        }
+        assert(this->mapped_data != nullptr);
+        assert(first <= this->elem_count);
+
+        vk::DeviceSize flush_count = count.value_or(this->elem_count - first);
+        assert(flush_count <= this->elem_count - first);
+
+        vk::DeviceSize flush_offset = first * sizeof(T);
+        vk::DeviceSize flush_size = flush_count * sizeof(T);
 
         return allocator.flushAllocation(
-            this->parent_allocation, 
-            this->base_offset + first * sizeof(T), 
+            this->parent_buffer->allocation, 
+            this->local_range.offset + flush_offset,
             flush_size
         ) == vk::Result::eSuccess;
     }
+
 private:
     friend class HeapBuffer;
 
-    vma::Allocation parent_allocation;
-    vk::DeviceAddress base_address;
-    vk::DeviceSize base_offset;
-    vk::DeviceSize elem_count;
-    void* mapped_data;
+    const Buffer* parent_buffer = nullptr;
+    vk::DeviceAddress base_address = 0;
+    vk::DeviceSize elem_count = 0;
+    void* mapped_data = nullptr;
 
     FreeListAllocation<vk::DeviceSize> local_range;
 };
@@ -94,9 +110,8 @@ public:
         }
 
         HeapSubBuffer<T> allocation;
-        allocation.parent_allocation = this->buffer_.allocation;
+        allocation.parent_buffer = &this->buffer_;
         allocation.base_address = this->buffer_.address + alloc->offset;
-        allocation.base_offset = alloc->offset;
         allocation.elem_count = count;
         allocation.mapped_data = this->buffer_.mapped(alloc->offset);
         allocation.local_range = *alloc;

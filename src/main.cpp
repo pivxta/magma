@@ -293,7 +293,10 @@ private:
                 .set_ao_roughness_metallic_map(aorm_map)
         );
         this->renderer.use_material(material);
-        this->renderer.add_mesh(generate_uv_sphere(24, 24, 0.5f));
+
+        MeshId mesh = this->renderer.add_mesh(generate_uv_sphere(16, 16, 0.5f));
+        this->renderer.use_mesh(mesh);
+
     }
 
     void update(float delta_time) {

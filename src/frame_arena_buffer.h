@@ -8,6 +8,15 @@ template<typename T>
 requires std::is_trivially_copyable_v<T>
 struct FrameSubBuffer {
 public:
+    const Buffer& buffer() const {
+        assert(this->parent_buffer != nullptr);
+        return *this->parent_buffer;
+    }
+
+    vk::DeviceSize buffer_offset() const {
+        return this->local_range.offset;
+    }
+
     vk::DeviceSize length() const {
         return this->elem_count;
     }
@@ -21,14 +30,22 @@ public:
     }
     
     T* mapped() {
+        assert(this->mapped_data != nullptr);
         return reinterpret_cast<T*>(this->mapped_data);
     }
 
     void write(const T& memory, vk::DeviceSize first = 0) {
+        assert(this->mapped_data != nullptr);
+        assert(first < this->elem_count);
+
         memcpy(this->mapped() + first, &memory, sizeof(T));
     }
     
     void write(std::span<const T> memory, vk::DeviceSize first = 0) {
+        assert(this->mapped_data != nullptr);
+        assert(first <= this->elem_count);
+        assert(memory.size() <= this->elem_count - first);
+
         memcpy(this->mapped() + first, memory.data(), memory.size_bytes());
     }
 
@@ -37,29 +54,33 @@ public:
         vk::DeviceSize first = 0,
         std::optional<vk::DeviceSize> count = std::nullopt
     ) {
-        vk::DeviceSize flush_size = this->local_range.size;
-        if (count.has_value()) {
-            flush_size = count.value() * sizeof(T);
-        }
+        assert(this->parent_buffer != nullptr);
+        assert(first <= this->elem_count);
+
+        vk::DeviceSize flush_count = count.value_or(this->elem_count - first);
+        assert(flush_count <= this->elem_count - first);
+
+        vk::DeviceSize flush_offset = first * sizeof(T);
+        vk::DeviceSize flush_size = flush_count * sizeof(T);
 
         return allocator.flushAllocation(
-            this->parent_allocation, 
-            this->base_offset + first * sizeof(T), 
+            this->parent_buffer->allocation, 
+            this->base_offset + flush_offset,
             flush_size
         ) == vk::Result::eSuccess;
     }
+
 private:
     friend class FrameArenaBuffer;
 
-    vma::Allocation parent_allocation;
-    vk::DeviceAddress base_address;
-    vk::DeviceSize base_offset;
-    vk::DeviceSize elem_count;
-    void* mapped_data;
+    const Buffer* parent_buffer = nullptr;
+    vk::DeviceAddress base_address = 0;
+    vk::DeviceSize base_offset = 0;
+    vk::DeviceSize elem_count = 0;
+    void* mapped_data = 0;
 
     ArenaAllocation<vk::DeviceSize> local_range;
 };
-
 
 class FrameArenaBuffer {
 public:
@@ -128,7 +149,7 @@ public:
 
         vk::DeviceSize offset = this->stride * this->frame_index + alloc->offset;
         FrameSubBuffer<T> allocation;
-        allocation.parent_allocation = this->buffer.allocation;
+        allocation.parent_buffer = &this->buffer;
         allocation.base_address = this->buffer.address + offset;
         allocation.base_offset = offset;
         allocation.elem_count = count;

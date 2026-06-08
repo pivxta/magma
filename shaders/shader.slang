@@ -10,21 +10,26 @@ struct Instance {
     uint32_t material_index;
 }
 
+struct Draw {
+    ImmutablePtr<Vertex> vertices;
+    uint instance_offset;
+}
+
 struct DrawConstants {
     ImmutablePtr<ViewUniforms> view;
     ImmutablePtr<LightUniforms> light;
     ImmutablePtr<PointLight> point_lights;
     ImmutablePtr<DirectionalLight> directional_lights;
-    ImmutablePtr<Instance> instances;
-    ImmutablePtr<Vertex> vertices;
     ImmutablePtr<Material> materials;
+    ImmutablePtr<Instance> instances;
+    ImmutablePtr<Draw> draws;
 }
 
 [[vk::push_constant]] 
 DrawConstants constants;
 
 struct VertexOutput {
-    float4 sv_position : SV_Position;
+    float4 clip_position: SV_Position;
     float2 tex_coords;
     float3 position;
     float3 normal;
@@ -39,15 +44,20 @@ struct ViewUniforms {
 }
 
 [shader("vertex")]
-VertexOutput vertexMain(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
+VertexOutput vertexMain(
+    uint draw_id: SV_DrawIndex,
+    uint instance_id: SV_InstanceID,
+    uint vertex_id: SV_VertexID
+) {
+    Draw draw = constants.draws[draw_id];
     Instance instance = constants.instances[instance_id];
-    Vertex vertex = constants.vertices[vertex_id];
+    Vertex vertex = draw.vertices[vertex_id];
     var world_position = float3(mul(instance.local_to_world, float4(vertex.position, 1.0)));
     var world_normal = float3(mul(instance.local_to_world, float4(vertex.normal, 0.0)));
     var world_tangent = float3(mul(instance.local_to_world, float4(vertex.tangent.xyz, 0.0)));
     
     VertexOutput output;
-    output.sv_position = mul(constants.view.world_to_clip, float4(world_position, 1.0));
+    output.clip_position = mul(constants.view.world_to_clip, float4(world_position, 1.0));
     output.position = world_position;
     output.normal = world_normal;
     output.tangent = world_tangent;
