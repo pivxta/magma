@@ -23,10 +23,12 @@ public:
     void flag_dirty_materials(const TextureManager& texture_manager);
     void update_dirty(const TextureManager& texture_manager, uint32_t frame_index);
 
-    MaterialId add(const Material& material);
     const Material* get(MaterialId id) const;
+    MaterialId add(const Material& material);
     void set(MaterialId id, const Material& material);
     void free(MaterialId id);
+
+    uint32_t get_index(MaterialId id) const;
 
     vk::DeviceAddress buffer_address(uint32_t frame_index) const {
         return this->buffers[frame_index].address;

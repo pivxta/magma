@@ -117,6 +117,10 @@ public:
         std::span<const T> values, 
         vk::DeviceSize alignment = DEFAULT_ALIGNMENT
     ) {
+        if (values.empty()) {
+            return FrameSubBuffer<T>{};
+        }
+
         auto buffer = this->allocate<T>(values.size(), alignment);
         if (!buffer.has_value()) {
             return std::nullopt;
@@ -141,6 +145,10 @@ public:
         vk::DeviceSize count = 1,
         vk::DeviceSize min_alignment = DEFAULT_ALIGNMENT
     ) {
+        if (count == 0) {
+            return FrameSubBuffer<T>{};
+        }
+
         vk::DeviceSize alignment = std::max(alignof(T), min_alignment);
         auto alloc = this->arena.allocate(count * sizeof(T), alignment);
         if (!alloc.has_value()) {

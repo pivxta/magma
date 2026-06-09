@@ -111,6 +111,10 @@ bool MeshManager::free(MeshId id) {
     });
 }
 
+bool MeshManager::is_valid(MeshId id) const {
+    return this->meshes.is_valid(get_slot_key(id));
+}
+
 void MeshManager::free_pending() {
     this->vertex_heap.free_pending();
     this->index_heap.free_pending();

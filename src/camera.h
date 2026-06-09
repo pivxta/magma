@@ -55,6 +55,22 @@ static glm::mat4 get_view_to_clip(const Projection& projection, float width, flo
 struct Camera {
     Transform transform;
     Projection projection = PerspectiveProjection();
+    bool active = true;
+
+    Camera& set_transform(const Transform& transform) {
+        this->transform = transform;
+        return *this;
+    }
+
+    Camera& set_projection(const Projection& projection) {
+        this->projection = projection;
+        return *this;
+    }
+
+    Camera& set_active(bool active = true) {
+        this->active = active;
+        return *this;
+    }
 
     glm::mat4 world_to_view() const {
         return this->transform.inverse_matrix();

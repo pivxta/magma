@@ -37,6 +37,8 @@ public:
     bool set(MeshId id, Uploader& uploader, const Mesh& mesh);
     bool free(MeshId id);
 
+    bool is_valid(MeshId id) const;
+
     void free_pending();
     void begin_frame(uint64_t frame_counter);
 

@@ -174,8 +174,20 @@ MaterialId MaterialManager::add(const Material& material) {
     return id;
 }
 
+uint32_t MaterialManager::get_index(MaterialId id) const {
+    if (this->materials.is_valid(get_slot_key(id))) {
+        return id.index;
+    } else {
+        return this->fallback.index;
+    }
+}
+
 const Material* MaterialManager::get(MaterialId id) const {
-    return this->materials.get(get_slot_key(id));
+    if (auto material = this->materials.get(get_slot_key(id)); material != nullptr) {
+        return material;
+    } else {
+        return this->materials.get(get_slot_key(this->fallback));
+    }
 }
 
 void MaterialManager::set(MaterialId id, const Material& material) {

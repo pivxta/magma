@@ -7,6 +7,7 @@ struct Camera;
 struct Material;
 struct Image;
 struct Mesh;
+struct Scene;
 
 class Renderer {
 public:
@@ -18,7 +19,6 @@ public:
     Renderer& operator=(Renderer&& other) noexcept;
 
     void resize();
-    void set_camera(const Camera& world_to_clip);
 
     TextureId add_texture(const Image& image); 
     void set_texture(TextureId id, const Image& image); 
@@ -28,14 +28,12 @@ public:
     const Material* get_material(MaterialId id);
     void set_material(MaterialId id, const Material& material);
     void free_material(MaterialId id);
-    void use_material(MaterialId id);
 
     MeshId add_mesh(const Mesh& mesh);
     void set_mesh(MeshId id, const Mesh& mesh);
     void free_mesh(MeshId id);
-    void use_mesh(MeshId id);
 
-    void draw_frame();
+    void draw(const Scene& scene);
 
 private:
     struct Inner;

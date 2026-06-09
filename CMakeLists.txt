@@ -147,6 +147,12 @@ add_executable(
     src/mip_map.cpp
     src/heap_buffer.h
     src/heap_buffer.cpp
+    src/logging.h
+    src/light.h
+    src/meshobject.h
+    src/scene.h
+    src/meshpreset.h
+    src/meshpreset.cpp
 )
 add_shaders(${PROJECT_NAME} shaders/shader.slang)
 add_compile_definitions(VULKAN_HPP_NO_EXCEPTIONS GLFW_INCLUDE_VULKAN)

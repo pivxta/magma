@@ -12,6 +12,8 @@
 #include "texture_manager.h"
 #include "material_manager.h"
 #include "mesh_manager.h"
+#include "scene.h"
+#include "time.h"
 #include <vector>
 #include <optional>
 #include <fstream>
@@ -25,9 +27,6 @@
 #include <glm/gtc/quaternion.hpp>
 #include <vulkan/vulkan.hpp>
 
-// Validation layers are only requested in debug builds; release builds skip
-// them entirely. Even in debug, we verify the layer is actually installed
-// before enabling it, so a machine without the Vulkan SDK still runs.
 #ifdef NDEBUG
 static constexpr bool ENABLE_VALIDATION_LAYERS = false;
 #else
@@ -56,15 +55,9 @@ struct InstanceData {
     glm::mat4x3 local_to_world;
     uint32_t material_index;
 
-    InstanceData(
-        uint32_t material_index,
-        glm::vec3 translation, 
-        glm::quat rotation = glm::identity<glm::quat>(), 
-        float scale = 1.0f
-    ) {
+    InstanceData(const Transform& transform, uint32_t material_index) {
         this->material_index = material_index;
-        this->local_to_world = glm::mat4x3(scale * glm::mat3_cast(rotation));
-        this->local_to_world[3] = translation;
+        this->local_to_world = transform.affine_matrix();
     }
 };
 
@@ -103,7 +96,26 @@ struct DrawData {
     uint32_t instance_offset;
 };
 
+struct ScratchData {
+    MeshId mesh_id;
+    uint32_t object_id;
+};
+
+struct SceneData {
+    ViewData view;
+    std::vector<InstanceData> instances;
+    std::vector<DirectionalLightData> dir_lights;
+    std::vector<PointLightData> point_lights;
+    AmbientLightData ambient_light;
+    glm::vec3 clear_color;
+
+    std::vector<ScratchData> scratch;
+    std::vector<DrawData> draws;
+    std::vector<vk::DrawIndexedIndirectCommand> draw_commands;
+};
+
 struct FrameData {
+    glm::vec3 clear_color;
     FrameSubBuffer<ViewData> view_data;
     FrameSubBuffer<LightData> light_data;
     FrameSubBuffer<DirectionalLightData> dir_lights;
@@ -188,7 +200,6 @@ struct Renderer::Inner {
             FRAME_ARENA_CAPACITY_PER_FIF
         );
         this->allocate_command_buffers(); 
-        this->create_buffers();
         this->create_pipeline(read_spirv_file("build/bin/shaders/shader.spv"));
     }
 
@@ -213,10 +224,6 @@ struct Renderer::Inner {
             this->instance.destroyDebugUtilsMessengerEXT(this->debug_messenger, nullptr, dldi);
         }
         this->instance.destroy();
-    }
-
-    void set_camera(const Camera& camera) {
-        this->camera = camera;
     }
 
     void resize() {
@@ -250,10 +257,6 @@ struct Renderer::Inner {
     void free_material(MaterialId id) {
         this->material_manager.free(id);
     }
-
-    void use_material(MaterialId id) {
-        this->material = id;
-    }
     
     MeshId add_mesh(const Mesh& mesh) {
         return this->mesh_manager.add(this->uploader, mesh);
@@ -267,11 +270,7 @@ struct Renderer::Inner {
         this->mesh_manager.free(id);
     }
 
-    void use_mesh(MeshId id) {
-        this->mesh = id;
-    }
-
-    void draw_frame() {
+    void draw(const Scene& scene) {
         vk::Fence fence = this->fences[this->frame_index];
 
         vk_expect(
@@ -301,6 +300,7 @@ struct Renderer::Inner {
         this->material_manager.flag_dirty_materials(this->texture_manager);
         this->material_manager.update_dirty(this->texture_manager, this->frame_index);
         this->texture_manager.clear_updated();
+        this->update_scene_data(scene);
 
         FrameData frame_data = this->write_frame_data();
 
@@ -493,7 +493,9 @@ private:
     void create_device_and_queue() {
         std::array queue_priorities = {1.0f};
         std::array enabled_extensions = {vk::KHRSwapchainExtensionName};
-        auto features = vk::PhysicalDeviceFeatures().setSamplerAnisotropy(true);
+        auto features = vk::PhysicalDeviceFeatures()
+            .setSamplerAnisotropy(true)
+            .setMultiDrawIndirect(true);
 
         auto [result, device] = this->physical_device.createDevice(
             vk::StructureChain{
@@ -745,75 +747,121 @@ private:
         }
     }
 
-    void create_buffers() {
-        const int layers = 1;
-        const int rows = 32;
-        const int columns = 32;
-        const float spacing = 2.0f;
-
-        for (int layer = 0; layer < layers; layer++) {
-            for (int row = 0; row < rows; row++) {
-                for (int column = 0; column < columns; column++) {
-                    auto frow = static_cast<float>(row);
-                    auto fcolumn = static_cast<float>(column);
-                    auto flayer = static_cast<float>(layer);
-                    float x = (frow - static_cast<float>(rows) * 0.5f + 0.5f) * spacing;
-                    float z = (fcolumn - static_cast<float>(columns) * 0.5f + 0.5f) * spacing;
-                    float y = flayer * spacing + 1.0f;
-                    this->instances.emplace_back(1, glm::vec3(x, y, z));
-                }
-            }
-        }
-    }
-
     Texture create_image(const vk::ImageCreateInfo& info) {
         return ::create_texture(this->device, this->allocator, info);
     }
 
-    FrameData write_frame_data() {
+    ViewData get_view_data(const Camera& camera) {
         vk::Extent2D viewport_size = this->swapchain.get_extent();
         auto viewport_width = static_cast<float>(viewport_size.width);
         auto viewport_height = static_cast<float>(viewport_size.height);
 
-        FrameSubBuffer view_data = this->frame_arena
-            .add(ViewData{
-                .world_to_clip = this->camera.world_to_clip(viewport_width, viewport_height),
-                .position = this->camera.transform.translation,
-            })
-            .value();
+        return {
+            .world_to_clip = camera.world_to_clip(viewport_width, viewport_height),
+            .position = camera.transform.translation,
+        };
+    }
 
+    void update_scene_data(const Scene& scene) {
+        this->scene_data.view = this->get_view_data(scene.camera);
+        this->scene_data.clear_color = scene.clear_color;
+        this->scene_data.ambient_light = {
+            .color = scene.ambient_light.color,
+            .illuminance = scene.ambient_light.illuminance
+        };
+
+        this->scene_data.point_lights.clear();
+        for (const auto& light: scene.point_lights) {
+            this->scene_data.point_lights.push_back({
+                .position = light.position,
+                .radius = 1000.0f,
+                .color = light.color,
+                .intensity = light.intensity
+            });
+        }
+
+        this->scene_data.dir_lights.clear();
+        for (const auto& light: scene.directional_lights) {
+            this->scene_data.dir_lights.push_back({ 
+                .direction = light.direction,
+                .color = light.color,
+                .illuminance = light.illuminance
+            });
+        }
+
+        this->scene_data.scratch.clear();
+        uint32_t object_id = 0;
+        for (const auto& object: scene.mesh_objects) {
+            if (this->mesh_manager.is_valid(object.mesh)) {
+                this->scene_data.scratch.push_back({
+                    .mesh_id = object.mesh,
+                    .object_id = object_id,
+                });
+            }
+            object_id += 1;
+        }
+        std::ranges::sort(
+            this->scene_data.scratch,
+            [](const auto& a, const auto& b) {
+                return a.mesh_id.index < b.mesh_id.index;
+            }
+        );
+
+        this->scene_data.instances.clear();
+        for (const auto& entry: this->scene_data.scratch) {
+            const auto& object = scene.mesh_objects[entry.object_id];
+            this->scene_data.instances.emplace_back(
+                object.transform,
+                this->material_manager.get_index(object.material)
+            );
+        }
+
+        this->scene_data.draws.clear();
+        this->scene_data.draw_commands.clear();
+        size_t i = 0;
+        while (i < this->scene_data.scratch.size()) {
+            const auto start = static_cast<uint32_t>(i);
+            const MeshId mesh_id = this->scene_data.scratch[i].mesh_id;
+            while (i < this->scene_data.scratch.size()
+                && this->scene_data.scratch[i].mesh_id.index == mesh_id.index) 
+            {
+                i++;
+            }
+            MeshData mesh = this->mesh_manager.get(mesh_id);
+            this->scene_data.draws.push_back({
+                .vertices = mesh.vertices_address,
+                .instance_offset = start
+            });
+            this->scene_data.draw_commands.push_back(
+                vk::DrawIndexedIndirectCommand()
+                    .setFirstIndex(mesh.index_offset)
+                    .setIndexCount(mesh.index_count)
+                    .setFirstInstance(0)
+                    .setInstanceCount(i - start)
+                    .setVertexOffset(0)
+            );
+        }
+    }
+
+    FrameData write_frame_data() {
+        FrameSubBuffer view_data = this->frame_arena.add(scene_data.view).value();
         FrameSubBuffer light_data = this->frame_arena
             .add(LightData {
-                .ambient_color = this->ambient_light.color,
-                .ambient_illuminance = this->ambient_light.illuminance,
-                .point_count = static_cast<uint32_t>(this->point_lights.size()),
-                .directional_count = static_cast<uint32_t>(this->directional_lights.size()),
+                .ambient_color = this->scene_data.ambient_light.color,
+                .ambient_illuminance = this->scene_data.ambient_light.illuminance,
+                .point_count = static_cast<uint32_t>(this->scene_data.point_lights.size()),
+                .directional_count = static_cast<uint32_t>(this->scene_data.dir_lights.size()),
             })
             .value();
 
-        FrameSubBuffer dir_lights = this->frame_arena.add(this->directional_lights).value();
-        FrameSubBuffer point_lights = this->frame_arena.add(this->point_lights).value();
-        FrameSubBuffer instances = this->frame_arena.add(this->instances).value();
-
-        MeshData mesh = this->mesh_manager.get(this->mesh);
-
-        FrameSubBuffer draws = this->frame_arena.add(std::vector{
-            DrawData {
-                .vertices = mesh.vertices_address,
-                .instance_offset = 0
-            }
-        }).value();
-
-        FrameSubBuffer draw_commands = this->frame_arena.add(std::vector{
-            vk::DrawIndexedIndirectCommand()
-                .setFirstIndex(mesh.index_offset)
-                .setIndexCount(mesh.index_count)
-                .setFirstInstance(0)
-                .setInstanceCount(instances.length())
-                .setVertexOffset(0)
-        }).value();
+        FrameSubBuffer dir_lights = this->frame_arena.add(scene_data.dir_lights).value();
+        FrameSubBuffer point_lights = this->frame_arena.add(scene_data.point_lights).value();
+        FrameSubBuffer instances = this->frame_arena.add(scene_data.instances).value();
+        FrameSubBuffer draws = this->frame_arena.add(scene_data.draws).value();
+        FrameSubBuffer draw_commands = this->frame_arena.add(scene_data.draw_commands).value();
         
         return {
+            .clear_color = scene_data.clear_color,
             .view_data = view_data,
             .light_data = light_data,
             .dir_lights = dir_lights,
@@ -905,14 +953,13 @@ private:
         const SwapchainImage& image,
         const FrameData& data
     ) {
-        glm::vec3 ambient_color = this->ambient_light.color * this->ambient_light.illuminance; 
         auto color_attachment = vk::RenderingAttachmentInfo()
             .setImageView(image.view)
             .setImageLayout(vk::ImageLayout::eColorAttachmentOptimal)
             .setClearValue(vk::ClearColorValue(
-                ambient_color.r, 
-                ambient_color.g, 
-                ambient_color.b, 
+                data.clear_color.r, 
+                data.clear_color.g, 
+                data.clear_color.b, 
                 1.0f
             ))
             .setLoadOp(vk::AttachmentLoadOp::eClear)
@@ -941,12 +988,14 @@ private:
             {this->texture_manager.descriptor_set()}, {}
         );
         command_buffer.bindIndexBuffer(this->mesh_manager.index_buffer(), 0, vk::IndexType::eUint32);
-        command_buffer.drawIndexedIndirect(
-            data.draw_commands.buffer(), 
-            data.draw_commands.buffer_offset(),
-            static_cast<uint32_t>(data.draw_commands.length()),
-            sizeof(vk::DrawIndexedIndirectCommand)
-        );
+        if (data.draw_commands.length() > 0) {
+            command_buffer.drawIndexedIndirect(
+                data.draw_commands.buffer(), 
+                data.draw_commands.buffer_offset(),
+                static_cast<uint32_t>(data.draw_commands.length()),
+                sizeof(vk::DrawIndexedIndirectCommand)
+            );
+        }
         command_buffer.endRendering();
     }
 
@@ -1023,30 +1072,7 @@ private:
     TextureManager texture_manager;
     MaterialManager material_manager;
     MeshManager mesh_manager;
-    MaterialId material;
-    MeshId mesh;
-
-    Camera camera;
-    AmbientLightData ambient_light = {
-        .color = glm::vec3(1.0f, 1.0f, 1.0f),
-        .illuminance = 0.5f
-    };
-    std::vector<PointLightData> point_lights = {
-        PointLightData { 
-            .position = glm::vec3(0.0f, -1.0f, 0.0f),
-            .radius = 100.0f,
-            .color = glm::vec3(1.0f, 1.0f, 1.0f),
-            .intensity = 600.0f
-        }
-    };
-    std::vector<DirectionalLightData> directional_lights = {
-        DirectionalLightData { 
-            .direction = glm::vec3(0.3f, 1.5f, 0.6f),
-            .color = glm::vec3(1.0f, 1.0f, 1.0f),
-            .illuminance = 2.0f
-        }
-    };
-    std::vector<InstanceData> instances;
+    SceneData scene_data;
 };
 
 Renderer::Renderer() = default;
@@ -1088,10 +1114,6 @@ void Renderer::free_material(MaterialId id) {
     return this->inner->free_material(id);
 }
 
-void Renderer::use_material(MaterialId id) {
-    return this->inner->use_material(id);
-}
-
 TextureId Renderer::add_texture(const Image& image) {
     return this->inner->add_texture(image);
 }
@@ -1116,14 +1138,6 @@ void Renderer::free_mesh(MeshId id) {
     this->inner->free_mesh(id);
 }
 
-void Renderer::use_mesh(MeshId id) {
-    this->inner->use_mesh(id);
-}
-
-void Renderer::set_camera(const Camera& camera) {
-    this->inner->set_camera(camera);
-}
-
-void Renderer::draw_frame() {
-    this->inner->draw_frame();
+void Renderer::draw(const Scene& scene) {
+    this->inner->draw(scene);
 }

@@ -221,8 +221,8 @@ struct Material {
         Texture2D displacement_texture,
         SamplerState displacement_sampler
     ) {
-        const float min_layers = 4.0;
-        const float max_layers = 12.0;
+        const float min_layers = 8.0;
+        const float max_layers = 32.0;
 
         let num_layers = lerp(max_layers, min_layers, abs(local_view_dir.z));
         let layer_depth = 1.0 / num_layers;
@@ -231,7 +231,8 @@ struct Material {
         let dx = ddx(tex_coords);
         let dy = ddy(tex_coords);
 
-        let delta_tex_coords = (local_view_dir.xy * displacement_factor / local_view_dir.z) / num_layers;
+        let z = max(local_view_dir.z, 0.0);
+        let delta_tex_coords = (local_view_dir.xy * displacement_factor / z) / num_layers;
         var current_tex_coords = tex_coords;
         var current_depth = 1.0 - displacement_texture.SampleGrad(
             displacement_sampler, 

@@ -7,9 +7,10 @@
 #include "window.h"
 #include "input.h"
 #include "renderer.h"
+#include "scene.h"
 #include "performance.h"
 #include "time.h"
-#include "mesh.h"
+#include "meshpreset.h"
 #include "image.h"
 
 struct ControllerSettings {
@@ -119,101 +120,6 @@ private:
     }
 };
 
-Mesh generate_uv_sphere(uint32_t stacks, uint32_t slices, float radius = 1.0f) {
-    std::vector<glm::vec3> positions;
-    std::vector<glm::vec3> normals;
-    std::vector<glm::vec4> tangents;
-    std::vector<glm::vec2> tex_coords;
-    std::vector<uint32_t> indices;
-
-    for (uint32_t stack = 0; stack <= stacks; stack++) {
-        float phi = glm::pi<float>() * static_cast<float>(stack) / static_cast<float>(stacks);
-        float cos_phi = std::cos(phi);
-        float sin_phi = std::sin(phi);
-
-        for (uint32_t slice = 0; slice <= slices; slice++) {
-            float theta = 2.0f * glm::pi<float>() * static_cast<float>(slice) / static_cast<float>(slices);
-            float cos_theta = std::cos(theta);
-            float sin_theta = std::sin(theta);
-
-            glm::vec3 normal = {
-                sin_phi * cos_theta,
-                cos_phi,
-                sin_phi * sin_theta,
-            };
-            glm::vec3 position = normal * radius;
-            glm::vec2 uv = {
-                static_cast<float>(slice) / static_cast<float>(slices),
-                static_cast<float>(stack) / static_cast<float>(stacks),
-            };
-            // Tangent along the theta direction
-            glm::vec4 tangent = {
-                -sin_theta,
-                0.0f,
-                cos_theta,
-                1.0f  // bitangent sign
-            };
-
-            positions.push_back(position);
-            normals.push_back(normal);
-            tex_coords.push_back(uv);
-            tangents.push_back(tangent);
-        }
-    }
-
-    for (uint32_t stack = 0; stack < stacks; stack++) {
-        for (uint32_t slice = 0; slice < slices; slice++) {
-            uint32_t a = stack * (slices + 1) + slice;
-            uint32_t b = a + 1;
-            uint32_t c = a + (slices + 1);
-            uint32_t d = c + 1;
-
-            indices.push_back(a);
-            indices.push_back(b);
-            indices.push_back(c);
-
-            indices.push_back(c);
-            indices.push_back(b);
-            indices.push_back(d);
-        }
-    }
-
-    return Mesh()
-        .set_positions(std::move(positions))
-        .set_normals(std::move(normals))
-        .set_tangents(std::move(tangents))
-        .set_tex_coords(std::move(tex_coords))
-        .set_indices(std::move(indices));
-}
-
-Mesh generate_plane(float size = 1.0f, float uv_scale = 1.0f) {
-    const float h = size * 0.5f;
-    const float t = uv_scale;
-
-    std::vector<glm::vec3> positions = {
-        {-h, 0.0f, -h},
-        { h, 0.0f, -h},
-        {-h, 0.0f,  h},
-        { h, 0.0f,  h},
-    };
-    std::vector<glm::vec2> tex_coords = {
-        {0.0f, 0.0f},
-        {t, 0.0f},
-        {0.0f, t},
-        {t, t},
-    };
-    std::vector<glm::vec3> normals(4, {0.0f, -1.0f, 0.0f});
-    std::vector<glm::vec4> tangents(4, {1.0f, 0.0f, 0.0f, 1.0f});
-    std::vector<uint32_t> indices = { 0, 1, 2, 1, 3, 2 };
-
-    return Mesh()
-        .set_positions(std::move(positions))
-        .set_normals(std::move(normals))
-        .set_tangents(std::move(tangents))
-        .set_tex_coords(std::move(tex_coords))
-        .set_indices(std::move(indices));
-}
-
 class App {
 public:
     App() = default;
@@ -247,8 +153,7 @@ private:
             }
 
             this->update(delta_time);
-            this->renderer.set_camera(this->camera);
-            this->renderer.draw_frame();
+            this->renderer.draw(this->scene);
 
             if (auto perf_stats = perf_counter.record(1.0); perf_stats != std::nullopt) {
                 spdlog::info(
@@ -266,38 +171,95 @@ private:
     void start() {
         this->window.set_cursor_locked(true);
 
-        TextureId base_color;
-        TextureId normal_map;
-        TextureId aorm_map;
-        TextureId displacement_map;
+        TextureId rocks_base_color;
+        TextureId rocks_normal_map;
+        TextureId rocks_aorm_map;
+        TextureId rocks_displacement_map;
+
+        TextureId paving_base_color;
+        TextureId paving_normal_map;
+        TextureId paving_aorm_map;
+        TextureId paving_displacement_map;
         
         if (auto image = Image::load("images/rocks.jpg"); image != std::nullopt) {
-            base_color = this->renderer.add_texture(image.value());
+            rocks_base_color = this->renderer.add_texture(image.value());
         }
-
         auto linear_load = ImageLoadInfo().set_colorspace(ImageColorspace::Linear);
         if (auto image = Image::load("images/rocksaorm.png", linear_load); image != std::nullopt) {
-            aorm_map = this->renderer.add_texture(image.value());
+            rocks_aorm_map = this->renderer.add_texture(image.value());
         }
         if (auto image = Image::load("images/rocksnormal.jpg", linear_load); image != std::nullopt) {
-            normal_map = this->renderer.add_texture(image.value());
+            rocks_normal_map = this->renderer.add_texture(image.value());
         }
         if (auto image = Image::load("images/rocksdisplacement.jpg", linear_load); image != std::nullopt) {
-            displacement_map = this->renderer.add_texture(image.value());
+            rocks_displacement_map = this->renderer.add_texture(image.value());
+        }
+
+        if (auto image = Image::load("images/pavingstones.jpg"); image != std::nullopt) {
+            paving_base_color = this->renderer.add_texture(image.value());
+        }
+        if (auto image = Image::load("images/pavingstonesaorm.png", linear_load); image != std::nullopt) {
+            paving_aorm_map = this->renderer.add_texture(image.value());
+        }
+        if (auto image = Image::load("images/pavingstonesnormal.jpg", linear_load); image != std::nullopt) {
+            paving_normal_map = this->renderer.add_texture(image.value());
+        }
+        if (auto image = Image::load("images/pavingstonesdisplacement.jpg", linear_load); image != std::nullopt) {
+            paving_displacement_map = this->renderer.add_texture(image.value());
         }
         
-        MaterialId material = this->renderer.add_material(
+        MaterialId rocks = this->renderer.add_material(
             Material()
-                .set_base_color_texture(base_color)
-                .set_normal_map(normal_map)
-                .set_displacement_map(displacement_map)
-                .set_ao_roughness_metallic_map(aorm_map)
+                .set_base_color_texture(rocks_base_color)
+                .set_normal_map(rocks_normal_map)
+                .set_displacement_map(rocks_displacement_map)
+                .set_ao_roughness_metallic_map(rocks_aorm_map)
         );
-        this->renderer.use_material(material);
 
-        MeshId mesh = this->renderer.add_mesh(generate_uv_sphere(16, 16, 0.5f));
-        this->renderer.use_mesh(mesh);
+        MaterialId paving = this->renderer.add_material(
+            Material()
+                .set_base_color_texture(paving_base_color)
+                .set_normal_map(paving_normal_map)
+                .set_displacement_map(paving_displacement_map)
+                .set_ao_roughness_metallic_map(paving_aorm_map)
+        );
 
+        MeshId floor = this->renderer.add_mesh(Quad(1.0f).to_mesh());
+        MeshId cylinder = this->renderer.add_mesh(
+            Cylinder(2.0f, 0.5f)
+                .set_shading(ShadingMode::Flat)
+                .to_mesh()
+        );
+
+        this->scene.clear_color = glm::vec3(0.4f, 0.6f, 1.05f);
+        this->scene.ambient_light = AmbientLight()
+            .set_color(glm::vec3(0.5f, 0.5f, 0.5f))
+            .set_illuminance(1.0f);
+
+        for (int i = 0; i < 4; i++) {
+            for (int j = 0; j < 4; j++) {
+                this->scene.add(
+                    MeshObject()
+                        .set_mesh(floor)
+                        .set_material(paving)
+                        .set_transform(Transform(float(i) - 2.0f, 2.0f, float(j) - 2.0f))
+                );
+            }
+        }
+            
+        /*
+        this->scene.add(
+            MeshObject()
+                .set_mesh(cylinder)
+                .set_material(rocks)
+                .set_transform(Transform(0.0f, 1.0f, 0.0f))
+        );
+        */
+        this->scene.add(
+            DirectionalLight()
+                .set_illuminance(10.0f)
+                .set_direction(glm::vec3(1.0f, 2.0f, 0.5f))
+        );
     }
 
     void update(float delta_time) {
@@ -327,8 +289,8 @@ private:
         }
 
         this->controller.update(
-            this->camera.transform, 
-            this->camera.projection,
+            this->scene.camera.transform, 
+            this->scene.camera.projection,
             this->input,
             delta_time
         );
@@ -338,7 +300,7 @@ private:
     Input input;
     Renderer renderer;
 
-    Camera camera;
+    Scene scene;
     Controller controller;
     
     bool paused = false;
