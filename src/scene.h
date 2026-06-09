@@ -1,5 +1,5 @@
 #pragma once
 
-struct Renderable {
+class Scene {
     
 };

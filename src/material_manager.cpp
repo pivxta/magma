@@ -1,6 +1,5 @@
 #include "material_manager.h"
 #include "texture_manager.h"
-#include <spdlog/spdlog.h>
 #include <vulkan/vulkan.hpp>
 
 struct MaterialData {

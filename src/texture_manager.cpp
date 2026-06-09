@@ -2,16 +2,12 @@
 #include "image.h"
 #include "vk_error.h"
 #include <cassert>
-#include <spdlog/spdlog.h>
-
-static constexpr uint32_t FALLBACK_COUNT = static_cast<uint32_t>(TextureFallback::Count);
-static constexpr uint32_t SAMPLER_COUNT = static_cast<uint32_t>(Sampler::Count);
 
 static vk::DescriptorPool create_descriptor_pool(vk::Device device, uint32_t max_images) {
     std::array pool_sizes = {
         vk::DescriptorPoolSize()
             .setType(vk::DescriptorType::eSampler)
-            .setDescriptorCount(SAMPLER_COUNT),
+            .setDescriptorCount(static_cast<uint32_t>(Sampler::Count)),
         vk::DescriptorPoolSize()
             .setType(vk::DescriptorType::eSampledImage)
             .setDescriptorCount(max_images),
@@ -36,7 +32,7 @@ static vk::DescriptorSetLayout create_set_layout(vk::Device device, uint32_t max
         vk::DescriptorSetLayoutBinding()
             .setBinding(1)
             .setDescriptorType(vk::DescriptorType::eSampler)
-            .setDescriptorCount(SAMPLER_COUNT)
+            .setDescriptorCount(static_cast<uint32_t>(Sampler::Count))
             .setStageFlags(vk::ShaderStageFlagBits::eFragment),
     };
 
@@ -85,7 +81,7 @@ TextureManager::TextureManager(
     textures(max_textures),
     frames_in_flight(frames_in_flight)
 {
-    assert(max_textures > FALLBACK_COUNT);
+    assert(max_textures > static_cast<uint32_t>(TextureFallback::Count));
     this->desc_pool = create_descriptor_pool(device, max_textures);
     this->desc_set_layout = create_set_layout(device, max_textures);
     this->desc_set = create_set(device, this->desc_pool, this->desc_set_layout);

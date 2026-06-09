@@ -14,7 +14,6 @@
 #include "mesh_manager.h"
 #include <vector>
 #include <optional>
-#include <iostream>
 #include <fstream>
 #include <filesystem>
 #include <spdlog/spdlog.h>
@@ -25,6 +24,16 @@
 #include <glm/mat4x3.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <vulkan/vulkan.hpp>
+
+// Validation layers are only requested in debug builds; release builds skip
+// them entirely. Even in debug, we verify the layer is actually installed
+// before enabling it, so a machine without the Vulkan SDK still runs.
+#ifdef NDEBUG
+static constexpr bool ENABLE_VALIDATION_LAYERS = false;
+#else
+static constexpr bool ENABLE_VALIDATION_LAYERS = true;
+#endif
+static constexpr const char* VALIDATION_LAYER_NAME = "VK_LAYER_KHRONOS_validation";
 
 static constexpr uint32_t MAX_TEXTURES = 4096;
 static constexpr uint32_t MAX_MATERIALS = 2048;
@@ -180,7 +189,7 @@ struct Renderer::Inner {
         );
         this->allocate_command_buffers(); 
         this->create_buffers();
-        this->create_pipeline(read_spirv_file("bin/shaders/shader.spv"));
+        this->create_pipeline(read_spirv_file("build/bin/shaders/shader.spv"));
     }
 
     void destroy() {
@@ -199,6 +208,10 @@ struct Renderer::Inner {
         this->allocator.destroy();
         this->swapchain.destroy(this->device);
         this->device.destroy();
+        if (this->debug_messenger) {
+            vk::detail::DispatchLoaderDynamic dldi(this->instance, vkGetInstanceProcAddr);
+            this->instance.destroyDebugUtilsMessengerEXT(this->debug_messenger, nullptr, dldi);
+        }
         this->instance.destroy();
     }
 
@@ -315,19 +328,96 @@ struct Renderer::Inner {
     }
 
 private:
+    static bool validation_layer_available() {
+        auto [result, layers] = vk::enumerateInstanceLayerProperties();
+        if (result != vk::Result::eSuccess) {
+            return false;
+        }
+        for (const auto& layer : layers) {
+            if (strcmp(layer.layerName, VALIDATION_LAYER_NAME) == 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static VKAPI_ATTR vk::Bool32 VKAPI_CALL debug_callback(
+        vk::DebugUtilsMessageSeverityFlagBitsEXT severity,
+        vk::DebugUtilsMessageTypeFlagsEXT,
+        const vk::DebugUtilsMessengerCallbackDataEXT* data,
+        void*
+    ) {
+        const char* id = data->pMessageIdName != nullptr ? data->pMessageIdName : "";
+        switch (severity) {
+            case vk::DebugUtilsMessageSeverityFlagBitsEXT::eError:
+                spdlog::error("[vulkan] {}: {}", id, data->pMessage);
+                break;
+            case vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning:
+                spdlog::warn("[vulkan] {}: {}", id, data->pMessage);
+                break;
+            case vk::DebugUtilsMessageSeverityFlagBitsEXT::eInfo:
+                spdlog::debug("[vulkan] {}: {}", id, data->pMessage);
+                break;
+            default:
+                spdlog::trace("[vulkan] {}: {}", id, data->pMessage);
+                break;
+        }
+        return vk::False;
+    }
+
+    static vk::DebugUtilsMessengerCreateInfoEXT make_debug_messenger_create_info() {
+        using Severity = vk::DebugUtilsMessageSeverityFlagBitsEXT;
+        using Type = vk::DebugUtilsMessageTypeFlagBitsEXT;
+        return vk::DebugUtilsMessengerCreateInfoEXT()
+            .setMessageSeverity(Severity::eWarning | Severity::eError)
+            .setMessageType(Type::eGeneral | Type::eValidation | Type::ePerformance)
+            .setPfnUserCallback(debug_callback);
+    }
+
     void create_instance(const Target& target) {
-        std::array instance_layers = {"VK_LAYER_KHRONOS_validation"};
+        std::vector<const char*> instance_layers;
+        if constexpr (ENABLE_VALIDATION_LAYERS) {
+            if (validation_layer_available()) {
+                instance_layers.push_back(VALIDATION_LAYER_NAME);
+                spdlog::info("Validation layers enabled");
+            } else {
+                spdlog::warn(
+                    "Validation layers requested but '{}' is not available "
+                    "(is the Vulkan SDK installed?); continuing without them",
+                    VALIDATION_LAYER_NAME
+                );
+            }
+        }
+
+        const bool validation_enabled = !instance_layers.empty();
+
         std::vector instance_extensions = target.required_instance_extensions();
+        if (validation_enabled) {
+            instance_extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        }
+
+        auto debug_ci = make_debug_messenger_create_info();
 
         auto application = vk::ApplicationInfo().setApiVersion(vk::ApiVersion13);
-        auto [result, instance] = vk::createInstance(
-            vk::InstanceCreateInfo()
-                .setPEnabledExtensionNames(instance_extensions)
-                .setPEnabledLayerNames(instance_layers)
-                .setPApplicationInfo(&application)
-        );
+        auto instance_ci = vk::InstanceCreateInfo()
+            .setPEnabledExtensionNames(instance_extensions)
+            .setPEnabledLayerNames(instance_layers)
+            .setPApplicationInfo(&application);
+        if (validation_enabled) {
+            instance_ci.setPNext(&debug_ci);
+        }
+
+        auto [result, instance] = vk::createInstance(instance_ci);
         vk_expect(result, "Failed to create instance");
         this->instance = instance;
+
+        if (validation_enabled) {
+            vk::detail::DispatchLoaderDynamic dldi(this->instance, vkGetInstanceProcAddr);
+            auto [msg_result, messenger] =
+                this->instance.createDebugUtilsMessengerEXT(debug_ci, nullptr, dldi);
+            vk_expect(msg_result, "Failed to create debug messenger");
+            this->debug_messenger = messenger;
+        }
     }
 
     void pick_physical_device() {
@@ -904,6 +994,7 @@ private:
     }
 
     vk::Instance instance;
+    vk::DebugUtilsMessengerEXT debug_messenger = nullptr;
     vk::PhysicalDevice physical_device;
     vk::Device device;
     vk::Queue queue;

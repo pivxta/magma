@@ -1,4 +1,5 @@
 #include <spdlog/spdlog.h>
+#include "logging.h"
 #include <cmath>
 #include <algorithm>
 #include "material.h"
@@ -270,18 +271,18 @@ private:
         TextureId aorm_map;
         TextureId displacement_map;
         
-        if (auto image = Image::load("../images/rocks.jpg"); image != std::nullopt) {
+        if (auto image = Image::load("images/rocks.jpg"); image != std::nullopt) {
             base_color = this->renderer.add_texture(image.value());
         }
 
         auto linear_load = ImageLoadInfo().set_colorspace(ImageColorspace::Linear);
-        if (auto image = Image::load("../images/rocksaorm.png", linear_load); image != std::nullopt) {
+        if (auto image = Image::load("images/rocksaorm.png", linear_load); image != std::nullopt) {
             aorm_map = this->renderer.add_texture(image.value());
         }
-        if (auto image = Image::load("../images/rocksnormal.jpg", linear_load); image != std::nullopt) {
+        if (auto image = Image::load("images/rocksnormal.jpg", linear_load); image != std::nullopt) {
             normal_map = this->renderer.add_texture(image.value());
         }
-        if (auto image = Image::load("../images/rocksdisplacement.jpg", linear_load); image != std::nullopt) {
+        if (auto image = Image::load("images/rocksdisplacement.jpg", linear_load); image != std::nullopt) {
             displacement_map = this->renderer.add_texture(image.value());
         }
         
@@ -344,7 +345,7 @@ private:
 };
 
 int main() {
-    spdlog::set_level(spdlog::level::trace);
+    configure_logging();
     App app;
     app.run();
     return 0;

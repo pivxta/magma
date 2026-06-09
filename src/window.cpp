@@ -2,7 +2,6 @@
 #include "input.h"
 #include "target.h"
 #include <bitset>
-#include <spdlog/spdlog.h>
 #include <GLFW/glfw3.h>
 
 static constexpr size_t NUM_KEYS = static_cast<size_t>(Key::Last) + 1;

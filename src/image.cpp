@@ -1,5 +1,4 @@
 #define STB_IMAGE_IMPLEMENTATION
-#include <spdlog/spdlog.h>
 #include <stb_image.h>
 #include "image.h"
 

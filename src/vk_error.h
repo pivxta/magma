@@ -2,7 +2,6 @@
 #include <spdlog/spdlog.h>
 #include <vulkan/vulkan.hpp>
 
-template<typename... Args>
 static inline void vk_expect(vk::Result result, const char* msg) {
     if (result != vk::Result::eSuccess) {
         spdlog::critical(msg);
@@ -15,7 +14,6 @@ static inline void vk_expect(vk::Result result, const char* msg) {
     }
 }
 
-template<typename... Args>
 static inline void vk_expect(VkResult result, const char* msg) {
     if (result != VK_SUCCESS) {
         spdlog::critical(msg);
