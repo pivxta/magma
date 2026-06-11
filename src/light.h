@@ -39,6 +39,7 @@ struct DirectionalLight {
 
 struct PointLight {
     glm::vec3 position = glm::vec3(0.0, 0.0, 0.0);
+    float radius = 30.0f;
     glm::vec3 color = glm::vec3(1.0);
     float intensity = 200.0;
 
@@ -54,6 +55,11 @@ struct PointLight {
 
     PointLight& set_intensity(float intensity) {
         this->intensity = intensity;
+        return *this;
+    }
+
+    PointLight& set_radius(float radius) {
+        this->radius = radius;
         return *this;
     }
 };

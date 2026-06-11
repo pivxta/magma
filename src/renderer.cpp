@@ -12,6 +12,7 @@
 #include "texture_manager.h"
 #include "material_manager.h"
 #include "mesh_manager.h"
+#include "device.h"
 #include "scene.h"
 #include "time.h"
 #include <vector>
@@ -27,19 +28,56 @@
 #include <glm/gtc/quaternion.hpp>
 #include <vulkan/vulkan.hpp>
 
-#ifdef NDEBUG
-static constexpr bool ENABLE_VALIDATION_LAYERS = false;
-#else
-static constexpr bool ENABLE_VALIDATION_LAYERS = true;
-#endif
-static constexpr const char* VALIDATION_LAYER_NAME = "VK_LAYER_KHRONOS_validation";
-
 static constexpr uint32_t MAX_TEXTURES = 4096;
 static constexpr uint32_t MAX_MATERIALS = 2048;
-static constexpr auto FRAME_ARENA_CAPACITY_PER_FIF = vk::DeviceSize(16 * 1024 * 1024);
-static constexpr auto UPLOADER_CAPACITY_PER_FIF = vk::DeviceSize(64 * 1024 * 1024);
-static constexpr auto VERTEX_HEAP_CAPACITY = vk::DeviceSize(128 * 1024 * 1024);
-static constexpr auto INDEX_HEAP_CAPACITY = vk::DeviceSize(64 * 1024 * 1024);
+static constexpr auto FRAME_ARENA_CAPACITY_PER_FIF = static_cast<vk::DeviceSize>(16 * 1024 * 1024);
+static constexpr auto UPLOADER_CAPACITY_PER_FIF = static_cast<vk::DeviceSize>(64 * 1024 * 1024);
+static constexpr auto VERTEX_HEAP_CAPACITY = static_cast<vk::DeviceSize>(128 * 1024 * 1024);
+static constexpr auto INDEX_HEAP_CAPACITY = static_cast<vk::DeviceSize>(64 * 1024 * 1024);
+
+static const std::filesystem::path SHADER_DIRECTORY = "shaders/compiled";
+
+// NOLINTBEGIN(performance-enum-size)
+enum class TonemapType: uint32_t {
+    None = 0,
+    Reinhard = 1,
+    Agx = 2,
+};
+// NOLINTEND(performance-enum-size)
+
+struct AgxConstants {
+    float saturation;
+    alignas(16) glm::vec3 slope;
+    alignas(16) glm::vec3 offset;
+    alignas(16) glm::vec3 power;
+};
+
+struct TonemapConstants {
+    TonemapType type;
+    float exposure;
+
+    AgxConstants agx;
+
+    TonemapConstants(const Tonemap& tonemap, float film_exposure) {
+        std::visit([&](const auto& value) {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, DisabledTonemap>) {
+                this->type = TonemapType::None;
+                this->exposure = film_exposure;
+            } else if constexpr (std::is_same_v<T, ReinhardTonemap>) {
+                this->type = TonemapType::Reinhard;
+                this->exposure = film_exposure * value.exposure_factor; 
+            } else if constexpr (std::is_same_v<T, AgxTonemap>) {
+                this->type = TonemapType::Agx;
+                this->exposure = film_exposure * value.exposure_factor; 
+                this->agx.saturation = value.look.saturation;
+                this->agx.power = value.look.power;
+                this->agx.slope = value.look.slope;
+                this->agx.offset = value.look.offset;
+            }
+        }, tonemap);
+    }
+};
 
 struct DrawConstants {
     vk::DeviceAddress view_data;
@@ -101,7 +139,7 @@ struct ScratchData {
     uint32_t object_id;
 };
 
-struct SceneData {
+struct SceneDrawData {
     ViewData view;
     std::vector<InstanceData> instances;
     std::vector<DirectionalLightData> dir_lights;
@@ -144,6 +182,75 @@ static inline std::vector<uint32_t> read_spirv_file(const std::filesystem::path&
     }
 };
 
+static vk::DescriptorPool create_tonemap_descriptor_pool(vk::Device device, uint32_t set_count) {
+    std::array pool_sizes = {
+        vk::DescriptorPoolSize()
+            .setType(vk::DescriptorType::eSampledImage)
+            .setDescriptorCount(set_count),
+        vk::DescriptorPoolSize()
+            .setType(vk::DescriptorType::eSampler)
+            .setDescriptorCount(set_count),
+    };
+    auto [result, pool] = device.createDescriptorPool(
+        vk::DescriptorPoolCreateInfo()
+            .setMaxSets(set_count)
+            .setPoolSizes(pool_sizes)
+    );
+    vk_expect(result, "Failed to create tonemap descriptor pool");
+    return pool;
+}
+
+static vk::DescriptorSetLayout create_tonemap_set_layout(vk::Device device) {
+    std::array bindings = {
+        vk::DescriptorSetLayoutBinding()
+            .setBinding(0)
+            .setDescriptorType(vk::DescriptorType::eSampledImage)
+            .setDescriptorCount(1)
+            .setStageFlags(vk::ShaderStageFlagBits::eFragment),
+        vk::DescriptorSetLayoutBinding()
+            .setBinding(1)
+            .setDescriptorType(vk::DescriptorType::eSampler)
+            .setDescriptorCount(1)
+            .setStageFlags(vk::ShaderStageFlagBits::eFragment),
+    };
+    auto [result, layout] = device.createDescriptorSetLayout(
+        vk::DescriptorSetLayoutCreateInfo().setBindings(bindings)
+    );
+    vk_expect(result, "Failed to create tonemap descriptor set layout");
+    return layout;
+}
+
+static std::vector<vk::DescriptorSet> allocate_tonemap_sets(
+    vk::Device device,
+    vk::DescriptorPool pool,
+    vk::DescriptorSetLayout layout,
+    uint32_t count
+) {
+    std::vector<vk::DescriptorSetLayout> layouts(count, layout);
+    auto [result, sets] = device.allocateDescriptorSets(
+        vk::DescriptorSetAllocateInfo()
+            .setDescriptorPool(pool)
+            .setSetLayouts(layouts)
+    );
+    vk_expect(result, "Failed to allocate tonemap descriptor sets");
+    return sets;
+}
+
+static vk::Sampler create_tonemap_sampler(vk::Device device) {
+    auto [result, sampler] = device.createSampler(
+        vk::SamplerCreateInfo()
+            .setMagFilter(vk::Filter::eLinear)
+            .setMinFilter(vk::Filter::eLinear)
+            .setMipmapMode(vk::SamplerMipmapMode::eNearest)
+            .setAddressModeU(vk::SamplerAddressMode::eClampToEdge)
+            .setAddressModeV(vk::SamplerAddressMode::eClampToEdge)
+            .setAddressModeW(vk::SamplerAddressMode::eClampToEdge)
+            .setMinLod(0.0f)
+            .setMaxLod(0.0f)
+    );
+    vk_expect(result, "Failed to create tonemap sampler");
+    return sampler;
+}
 
 struct Renderer::Inner {
     static constexpr uint32_t FRAMES_IN_FLIGHT = 2;
@@ -153,77 +260,69 @@ struct Renderer::Inner {
     }
 
     void initialize(const std::shared_ptr<Target>& target) {
-        this->create_instance(*target);
+        this->instance = create_instance(*target);
         this->swapchain = Swapchain(this->instance, target);
+
+        auto device = create_device(this->instance, this->swapchain);
+        if (!device.has_value()) {
+            spdlog::critical("Failed to create a suitable device");
+            std::exit(1);
+        }
+        this->device = device.value();
+
         this->swapchain_info = SwapchainConfigureInfo()
             .set_format(vk::Format::eB8G8R8A8Srgb)
             .set_colorspace(vk::ColorSpaceKHR::eSrgbNonlinear)
             .set_present_mode(vk::PresentModeKHR::eMailbox);
-        this->pick_physical_device();
-        this->create_device_and_queue();
-        this->create_allocator();
         this->configure_render_targets();
         this->create_sync_primitives();
         this->create_command_pool();
         this->uploader = Uploader(
             this->device,
-            this->allocator,
             FRAMES_IN_FLIGHT,
             UPLOADER_CAPACITY_PER_FIF
         );
         this->texture_manager = TextureManager(
             this->device,
-            this->allocator,
             this->uploader,
             FRAMES_IN_FLIGHT,
             MAX_TEXTURES
         );
         this->material_manager = MaterialManager(
             this->device,
-            this->allocator,
             FRAMES_IN_FLIGHT,
             MAX_MATERIALS
         );
         this->mesh_manager = MeshManager(
             this->device,
-            this->allocator,
             FRAMES_IN_FLIGHT,
             VERTEX_HEAP_CAPACITY,
             INDEX_HEAP_CAPACITY
         );
         this->frame_arena = FrameArenaBuffer(
             this->device,
-            this->allocator,
             vk::BufferUsageFlagBits::eStorageBuffer
                 | vk::BufferUsageFlagBits::eIndirectBuffer,
             FRAMES_IN_FLIGHT,
             FRAME_ARENA_CAPACITY_PER_FIF
         );
-        this->allocate_command_buffers(); 
-        this->create_pipeline(read_spirv_file("build/bin/shaders/shader.spv"));
+        this->allocate_command_buffers();
+        this->create_pipeline();
+        this->setup_tonemap();
+        this->create_tonemap_pipeline();
     }
 
     void destroy() {
-        vk_expect(this->device.waitIdle(), "Wait for device failed");
-        this->device.destroyPipeline(this->pipeline);
-        this->device.destroyPipelineLayout(this->pipeline_layout);
-        this->device.freeCommandBuffers(this->command_pool, this->command_buffers);
-        this->device.destroyCommandPool(this->command_pool);
+        this->device->wait_idle();
+        this->device->logical.destroyPipeline(this->tonemap_pipeline);
+        this->device->logical.destroyPipelineLayout(this->tonemap_pipeline_layout);
+        this->device->logical.destroyPipeline(this->pipeline);
+        this->device->logical.destroyPipelineLayout(this->pipeline_layout);
+        this->device->logical.freeCommandBuffers(this->command_pool, this->command_buffers);
+        this->device->logical.destroyCommandPool(this->command_pool);
         this->destroy_sync_primitives();
-        this->destroy_depth_textures();
-        this->uploader.destroy();
-        this->frame_arena.destroy();
-        this->texture_manager.destroy();
-        this->material_manager.destroy();
-        this->mesh_manager.destroy();
-        this->allocator.destroy();
-        this->swapchain.destroy(this->device);
-        this->device.destroy();
-        if (this->debug_messenger) {
-            vk::detail::DispatchLoaderDynamic dldi(this->instance, vkGetInstanceProcAddr);
-            this->instance.destroyDebugUtilsMessengerEXT(this->debug_messenger, nullptr, dldi);
-        }
-        this->instance.destroy();
+        this->destroy_target_textures();
+        this->destroy_tonemap();
     }
 
     void resize() {
@@ -274,19 +373,16 @@ struct Renderer::Inner {
         vk::Fence fence = this->fences[this->frame_index];
 
         vk_expect(
-            device.waitForFences(
-                fence, true, 
+            this->device->logical.waitForFences(
+                fence, true,
                 std::numeric_limits<uint64_t>::max()
             ),
             "Fence wait failed"
         );
 
         auto [result1, image] = this->swapchain.acquire_image(
-            this->device, 
             this->image_available[this->frame_index]
         );
-
-        vk_expect(device.resetFences(fence), "Fence reset failed");
 
         if (result1 == vk::Result::eErrorOutOfDateKHR) {
             this->reconfigure_render_targets();
@@ -295,22 +391,20 @@ struct Renderer::Inner {
             vk_expect(result1, "Critical swapchain image acquisition failure");
         }
 
+        vk_expect(this->device->logical.resetFences(fence), "Fence reset failed");
         this->mesh_manager.free_pending();
         this->texture_manager.destroy_pending();
         this->material_manager.flag_dirty_materials(this->texture_manager);
         this->material_manager.update_dirty(this->texture_manager, this->frame_index);
         this->texture_manager.clear_updated();
-        this->update_scene_data(scene);
-
-        FrameData frame_data = this->write_frame_data();
 
         vk::CommandBuffer command_buffer = this->begin_frame_commands();
         this->uploader.flush(command_buffer);
         this->texture_manager.flush_mip_maps(command_buffer);
-        this->record_frame_commands(command_buffer, image, frame_data);
+        this->record_frame_commands(command_buffer, image, scene);
         this->submit_frame_commands(command_buffer, image);
 
-        vk::Result result2 = this->swapchain.present(this->queue, image);
+        vk::Result result2 = this->swapchain.present(image);
         if (result2 == vk::Result::eSuboptimalKHR 
             || result2 == vk::Result::eErrorOutOfDateKHR 
             || this->should_reconfigure_swapchain) 
@@ -328,242 +422,31 @@ struct Renderer::Inner {
     }
 
 private:
-    static bool validation_layer_available() {
-        auto [result, layers] = vk::enumerateInstanceLayerProperties();
-        if (result != vk::Result::eSuccess) {
-            return false;
-        }
-        for (const auto& layer : layers) {
-            if (strcmp(layer.layerName, VALIDATION_LAYER_NAME) == 0) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    static VKAPI_ATTR vk::Bool32 VKAPI_CALL debug_callback(
-        vk::DebugUtilsMessageSeverityFlagBitsEXT severity,
-        vk::DebugUtilsMessageTypeFlagsEXT,
-        const vk::DebugUtilsMessengerCallbackDataEXT* data,
-        void*
-    ) {
-        const char* id = data->pMessageIdName != nullptr ? data->pMessageIdName : "";
-        switch (severity) {
-            case vk::DebugUtilsMessageSeverityFlagBitsEXT::eError:
-                spdlog::error("[vulkan] {}: {}", id, data->pMessage);
-                break;
-            case vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning:
-                spdlog::warn("[vulkan] {}: {}", id, data->pMessage);
-                break;
-            case vk::DebugUtilsMessageSeverityFlagBitsEXT::eInfo:
-                spdlog::debug("[vulkan] {}: {}", id, data->pMessage);
-                break;
-            default:
-                spdlog::trace("[vulkan] {}: {}", id, data->pMessage);
-                break;
-        }
-        return vk::False;
-    }
-
-    static vk::DebugUtilsMessengerCreateInfoEXT make_debug_messenger_create_info() {
-        using Severity = vk::DebugUtilsMessageSeverityFlagBitsEXT;
-        using Type = vk::DebugUtilsMessageTypeFlagBitsEXT;
-        return vk::DebugUtilsMessengerCreateInfoEXT()
-            .setMessageSeverity(Severity::eWarning | Severity::eError)
-            .setMessageType(Type::eGeneral | Type::eValidation | Type::ePerformance)
-            .setPfnUserCallback(debug_callback);
-    }
-
-    void create_instance(const Target& target) {
-        std::vector<const char*> instance_layers;
-        if constexpr (ENABLE_VALIDATION_LAYERS) {
-            if (validation_layer_available()) {
-                instance_layers.push_back(VALIDATION_LAYER_NAME);
-                spdlog::info("Validation layers enabled");
-            } else {
-                spdlog::warn(
-                    "Validation layers requested but '{}' is not available "
-                    "(is the Vulkan SDK installed?); continuing without them",
-                    VALIDATION_LAYER_NAME
-                );
-            }
-        }
-
-        const bool validation_enabled = !instance_layers.empty();
-
-        std::vector instance_extensions = target.required_instance_extensions();
-        if (validation_enabled) {
-            instance_extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-        }
-
-        auto debug_ci = make_debug_messenger_create_info();
-
-        auto application = vk::ApplicationInfo().setApiVersion(vk::ApiVersion13);
-        auto instance_ci = vk::InstanceCreateInfo()
-            .setPEnabledExtensionNames(instance_extensions)
-            .setPEnabledLayerNames(instance_layers)
-            .setPApplicationInfo(&application);
-        if (validation_enabled) {
-            instance_ci.setPNext(&debug_ci);
-        }
-
-        auto [result, instance] = vk::createInstance(instance_ci);
-        vk_expect(result, "Failed to create instance");
-        this->instance = instance;
-
-        if (validation_enabled) {
-            vk::detail::DispatchLoaderDynamic dldi(this->instance, vkGetInstanceProcAddr);
-            auto [msg_result, messenger] =
-                this->instance.createDebugUtilsMessengerEXT(debug_ci, nullptr, dldi);
-            vk_expect(msg_result, "Failed to create debug messenger");
-            this->debug_messenger = messenger;
-        }
-    }
-
-    void pick_physical_device() {
-        auto [result, devices] = this->instance.enumeratePhysicalDevices();
-        vk_expect(result, "Failed to enumerate physical devices");
-
-        for (auto device : devices) {
-            vk::PhysicalDeviceProperties2 props = device.getProperties2();
-            if (props.properties.apiVersion < vk::ApiVersion13) {
-                continue;
-            }
-            if (!device_has_swapchain_ext(device)) {
-                continue;
-            }
-            auto queue_family_index = pick_queue_family(device, this->swapchain.get_surface());
-            if (queue_family_index != std::nullopt) {
-                spdlog::info(
-                    "Selected device: '{}', device ID: {}, vendor ID: {}",
-                    props.properties.deviceName.data(),
-                    props.properties.deviceID,
-                    props.properties.vendorID
-                );
-                spdlog::info(
-                    "Vulkan API version: {}.{}.{}",
-                    vk::versionMajor(props.properties.apiVersion),
-                    vk::versionMinor(props.properties.apiVersion),
-                    vk::versionPatch(props.properties.apiVersion)
-                );
-                this->physical_device = device;
-                this->queue_family_index = *queue_family_index;
-                return;
-            }
-        }
-
-        spdlog::critical("Failed to find suitable physical device");
-        std::exit(1);
-    }
-
-    static bool device_has_swapchain_ext(vk::PhysicalDevice device) {
-        auto [result, extensions] = device.enumerateDeviceExtensionProperties();
-        vk_expect(result, "Device extension properties not available");
-
-        for (auto extension : extensions) {
-            if (strcmp(extension.extensionName, vk::KHRSwapchainExtensionName) == 0) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    static std::optional<uint32_t> pick_queue_family(vk::PhysicalDevice device, vk::SurfaceKHR surface) {
-        std::optional<uint32_t> selected_family = std::nullopt;
-        std::vector queue_families = device.getQueueFamilyProperties();
-        for (uint32_t current_family = 0; current_family < queue_families.size();
-             current_family++) {
-            vk::QueueFamilyProperties properties = queue_families[current_family];
-            if (!(properties.queueFlags & vk::QueueFlagBits::eGraphics)) {
-                continue;
-            }
-
-            auto [result, support] = device.getSurfaceSupportKHR(current_family, surface);
-            if (result != vk::Result::eSuccess || !support) {
-                continue;
-            }
-
-            selected_family = current_family;
-        }
-
-        return selected_family;
-    }
-
-    void create_device_and_queue() {
-        std::array queue_priorities = {1.0f};
-        std::array enabled_extensions = {vk::KHRSwapchainExtensionName};
-        auto features = vk::PhysicalDeviceFeatures()
-            .setSamplerAnisotropy(true)
-            .setMultiDrawIndirect(true);
-
-        auto [result, device] = this->physical_device.createDevice(
-            vk::StructureChain{
-                vk::DeviceCreateInfo()
-                    .setPEnabledFeatures(&features)
-                    .setPEnabledExtensionNames(enabled_extensions)
-                    .setQueueCreateInfos(
-                        vk::DeviceQueueCreateInfo()
-                            .setQueuePriorities(queue_priorities)
-                            .setQueueFamilyIndex(this->queue_family_index)
-                    ),
-
-                vk::PhysicalDeviceVulkan13Features()
-                    .setDynamicRendering(true)
-                    .setSynchronization2(true),
-                
-                vk::PhysicalDeviceVulkan12Features()
-                    .setDrawIndirectCount(true)
-                    .setScalarBlockLayout(true)
-                    .setBufferDeviceAddress(true)
-                    .setDescriptorIndexing(true)
-                    .setRuntimeDescriptorArray(true)
-                    .setDescriptorBindingPartiallyBound(true)
-                    .setDescriptorBindingSampledImageUpdateAfterBind(true)
-                    .setShaderSampledImageArrayNonUniformIndexing(true),
-
-                vk::PhysicalDeviceVulkan11Features().setShaderDrawParameters(true)
-            }.get()
-        );
-        vk_expect(result, "Failed to create device");
-
-        this->device = device;
-        this->queue = device.getQueue(queue_family_index, 0);
-    }
 
     void reconfigure_render_targets() {
         this->configure_render_targets();
+        this->write_tonemap_descriptors();
         this->should_reconfigure_swapchain = false;
     }
 
     void configure_render_targets() {
-        this->swapchain.configure(this->physical_device, this->device, this->swapchain_info);
+        this->device->wait_idle();
+        vk_expect(
+            this->swapchain.configure(this->device, this->swapchain_info),
+            "Failed to configure swapchain"
+        );
+        for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+            this->create_hdr_image(i);
+        }
         for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
             this->create_depth_image(i);
         }
     }
 
-    void create_allocator() {
-        auto vma_vk_functions = vma::VulkanFunctions()
-            .setVkGetInstanceProcAddr(vkGetInstanceProcAddr)
-            .setVkGetDeviceProcAddr(vkGetDeviceProcAddr);
-
-        auto vma_info = vma::AllocatorCreateInfo()
-            .setFlags(vma::AllocatorCreateFlagBits::eBufferDeviceAddress)
-            .setInstance(this->instance)
-            .setDevice(this->device)
-            .setPhysicalDevice(this->physical_device)
-            .setPVulkanFunctions(&vma_vk_functions);
-
-        auto [result, allocator] = vma::createAllocator(vma_info);
-        vk_expect(result, "Failed to create allocator");
-        this->allocator = allocator;
-    }
-
     void create_sync_primitives() {
         this->fences.resize(FRAMES_IN_FLIGHT);
         for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
-            auto [result, fence] = this->device.createFence(
+            auto [result, fence] = this->device->logical.createFence(
                 vk::FenceCreateInfo().setFlags(vk::FenceCreateFlagBits::eSignaled)
             );
             vk_expect(result, "Failed to create in-flight fence");
@@ -572,7 +455,7 @@ private:
 
         this->image_available.resize(FRAMES_IN_FLIGHT);
         for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
-            auto [result, semaphore] = this->device.createSemaphore(vk::SemaphoreCreateInfo());
+            auto [result, semaphore] = this->device->logical.createSemaphore(vk::SemaphoreCreateInfo());
             vk_expect(result, "Failed to create image available fence");
             this->image_available[i] = semaphore;
         }
@@ -580,25 +463,25 @@ private:
 
     void destroy_sync_primitives() {
         for (auto fence : this->fences) {
-            this->device.destroyFence(fence);
+            this->device->logical.destroyFence(fence);
         }
         for (auto image_available : this->image_available) {
-            this->device.destroySemaphore(image_available);
+            this->device->logical.destroySemaphore(image_available);
         }
     }
 
     void create_command_pool() {
-        auto [result, command_pool] = this->device.createCommandPool(
+        auto [result, command_pool] = this->device->logical.createCommandPool(
             vk::CommandPoolCreateInfo()
                 .setFlags(vk::CommandPoolCreateFlagBits::eResetCommandBuffer)
-                .setQueueFamilyIndex(queue_family_index)
+                .setQueueFamilyIndex(this->device->graphics_queue_family)
         );
         vk_expect(result, "Failed to create command pool");
         this->command_pool = command_pool;
     }
 
     void allocate_command_buffers() {
-        auto [result, command_buffers] = this->device.allocateCommandBuffers(
+        auto [result, command_buffers] = this->device->logical.allocateCommandBuffers(
             vk::CommandBufferAllocateInfo()
                 .setCommandPool(command_pool)
                 .setCommandBufferCount(FRAMES_IN_FLIGHT)
@@ -608,20 +491,178 @@ private:
         this->command_buffers = command_buffers;
     }
 
-    void create_pipeline(std::vector<uint32_t>&& shader_spirv) {
+    void setup_tonemap() {
+        this->tonemap_sampler = create_tonemap_sampler(this->device->logical);
+        this->tonemap_set_layout = create_tonemap_set_layout(this->device->logical);
+        this->tonemap_descriptor_pool =
+            create_tonemap_descriptor_pool(this->device->logical, FRAMES_IN_FLIGHT);
+        this->tonemap_sets = allocate_tonemap_sets(
+            this->device->logical,
+            this->tonemap_descriptor_pool,
+            this->tonemap_set_layout,
+            FRAMES_IN_FLIGHT
+        );
+        this->write_tonemap_descriptors();
+    }
+
+    void write_tonemap_descriptors() {
+        if (this->tonemap_sets.empty()) {
+            return;
+        }
+
+        std::vector<vk::DescriptorImageInfo> infos;
+        infos.reserve(this->tonemap_sets.size() * 2);
+        std::vector<vk::WriteDescriptorSet> writes;
+        writes.reserve(this->tonemap_sets.size() * 2);
+
+        for (uint32_t i = 0; i < this->tonemap_sets.size(); i++) {
+            infos.push_back(
+                vk::DescriptorImageInfo()
+                    .setImageView(this->hdr_textures[i].view)
+                    .setImageLayout(vk::ImageLayout::eShaderReadOnlyOptimal)
+            );
+            writes.push_back(
+                vk::WriteDescriptorSet()
+                    .setDstSet(this->tonemap_sets[i])
+                    .setDstBinding(0)
+                    .setDstArrayElement(0)
+                    .setDescriptorType(vk::DescriptorType::eSampledImage)
+                    .setImageInfo(infos.back())
+            );
+
+            infos.push_back(vk::DescriptorImageInfo().setSampler(this->tonemap_sampler));
+            writes.push_back(
+                vk::WriteDescriptorSet()
+                    .setDstSet(this->tonemap_sets[i])
+                    .setDstBinding(1)
+                    .setDstArrayElement(0)
+                    .setDescriptorType(vk::DescriptorType::eSampler)
+                    .setImageInfo(infos.back())
+            );
+        }
+
+        this->device->logical.updateDescriptorSets(writes, {});
+    }
+
+    void destroy_tonemap() {
+        this->device->logical.destroyDescriptorPool(this->tonemap_descriptor_pool);
+        this->device->logical.destroyDescriptorSetLayout(this->tonemap_set_layout);
+        this->device->logical.destroySampler(this->tonemap_sampler);
+    }
+
+    void create_tonemap_pipeline() {
+        std::vector shader_spirv = read_spirv_file(SHADER_DIRECTORY / "tonemap.spv");
         auto [result1, shader_module] =
-            this->device.createShaderModule(vk::ShaderModuleCreateInfo().setCode(shader_spirv));
+            this->device->logical.createShaderModule(vk::ShaderModuleCreateInfo().setCode(shader_spirv));
         vk_expect(result1, "Failed to create shader module");
 
         std::array shader_stages = {
             vk::PipelineShaderStageCreateInfo()
                 .setStage(vk::ShaderStageFlagBits::eVertex)
                 .setModule(shader_module)
-                .setPName("vertexMain"),
+                .setPName("vertex_main"),
             vk::PipelineShaderStageCreateInfo()
                 .setStage(vk::ShaderStageFlagBits::eFragment)
                 .setModule(shader_module)
-                .setPName("fragmentMain"),
+                .setPName("fragment_main"),
+        };
+
+        auto vertex_state = vk::PipelineVertexInputStateCreateInfo();
+
+        auto raster_state = vk::PipelineRasterizationStateCreateInfo()
+            .setPolygonMode(vk::PolygonMode::eFill)
+            .setFrontFace(vk::FrontFace::eCounterClockwise)
+            .setCullMode(vk::CullModeFlagBits::eBack)
+            .setLineWidth(1.0f);
+
+        auto input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo()
+            .setTopology(vk::PrimitiveTopology::eTriangleList);
+
+        vk::SampleMask sample_mask = ~static_cast<vk::SampleMask>(0);
+        auto ms_state = vk::PipelineMultisampleStateCreateInfo()
+            .setRasterizationSamples(vk::SampleCountFlagBits::e1)
+            .setPSampleMask(&sample_mask)
+            .setAlphaToCoverageEnable(false)
+            .setAlphaToOneEnable(false);
+
+        auto viewport_state = vk::PipelineViewportStateCreateInfo()
+            .setScissorCount(1)
+            .setViewportCount(1);
+
+        auto blend_attachment = vk::PipelineColorBlendAttachmentState()
+            .setBlendEnable(false)
+            .setColorWriteMask(
+                vk::ColorComponentFlagBits::eR 
+                    | vk::ColorComponentFlagBits::eG 
+                    | vk::ColorComponentFlagBits::eB 
+                    | vk::ColorComponentFlagBits::eA
+            );
+
+        auto blend_state = vk::PipelineColorBlendStateCreateInfo()
+            .setAttachments(blend_attachment);
+
+        std::array dynamic_states = {
+            vk::DynamicState::eViewport,
+            vk::DynamicState::eScissor,
+        };
+        auto dyn_state = vk::PipelineDynamicStateCreateInfo().setDynamicStates(dynamic_states);
+
+        std::array set_layouts = {this->tonemap_set_layout};
+        std::array push_constant_ranges = {
+            vk::PushConstantRange()
+                .setOffset(0)
+                .setSize(sizeof(TonemapConstants))
+                .setStageFlags(vk::ShaderStageFlagBits::eFragment)
+        };
+        auto [result2, pipeline_layout] = this->device->logical.createPipelineLayout(
+            vk::PipelineLayoutCreateInfo()
+                .setSetLayouts(set_layouts)
+                .setPushConstantRanges(push_constant_ranges)
+        );
+        vk_expect(result2, "Failed to create pipeline layout");
+
+        vk::Format swapchain_format = this->swapchain.format();
+        auto [result3, pipeline] = this->device->logical.createGraphicsPipeline(
+            vk::PipelineCache(),
+            vk::StructureChain{
+                vk::GraphicsPipelineCreateInfo()
+                    .setLayout(pipeline_layout)
+                    .setStages(shader_stages)
+                    .setPVertexInputState(&vertex_state)
+                    .setPInputAssemblyState(&input_assembly_state)
+                    .setPRasterizationState(&raster_state)
+                    .setPMultisampleState(&ms_state)
+                    .setPViewportState(&viewport_state)
+                    .setPColorBlendState(&blend_state)
+                    .setPDynamicState(&dyn_state),
+
+                vk::PipelineRenderingCreateInfo()
+                    .setColorAttachmentFormats(swapchain_format)
+            }
+            .get()
+        );
+        vk_expect(result3, "Failed to create graphics pipeline");
+        this->device->logical.destroyShaderModule(shader_module);
+
+        this->tonemap_pipeline = pipeline;
+        this->tonemap_pipeline_layout = pipeline_layout;
+    }
+
+    void create_pipeline() {
+        std::vector shader_spirv = read_spirv_file(SHADER_DIRECTORY / "pbr_forward.spv");
+        auto [result1, shader_module] =
+            this->device->logical.createShaderModule(vk::ShaderModuleCreateInfo().setCode(shader_spirv));
+        vk_expect(result1, "Failed to create shader module");
+
+        std::array shader_stages = {
+            vk::PipelineShaderStageCreateInfo()
+                .setStage(vk::ShaderStageFlagBits::eVertex)
+                .setModule(shader_module)
+                .setPName("vertex_main"),
+            vk::PipelineShaderStageCreateInfo()
+                .setStage(vk::ShaderStageFlagBits::eFragment)
+                .setModule(shader_module)
+                .setPName("fragment_main"),
         };
 
         auto vertex_state = vk::PipelineVertexInputStateCreateInfo();
@@ -676,15 +717,14 @@ private:
                 .setSize(sizeof(DrawConstants))
                 .setStageFlags(vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment)
         };
-        auto [result2, pipeline_layout] = this->device.createPipelineLayout(
+        auto [result2, pipeline_layout] = this->device->logical.createPipelineLayout(
             vk::PipelineLayoutCreateInfo()
                 .setSetLayouts(set_layouts)
                 .setPushConstantRanges(push_constant_ranges)
         );
         vk_expect(result2, "Failed to create pipeline layout");
 
-        vk::Format color_attachment_format = this->swapchain.get_format();
-        auto [result3, pipeline] = this->device.createGraphicsPipeline(
+        auto [result3, pipeline] = this->device->logical.createGraphicsPipeline(
             vk::PipelineCache(),
             vk::StructureChain{
                 vk::GraphicsPipelineCreateInfo()
@@ -700,16 +740,42 @@ private:
                     .setPDynamicState(&dyn_state),
 
                 vk::PipelineRenderingCreateInfo()
-                    .setColorAttachmentFormats(color_attachment_format)
+                    .setColorAttachmentFormats(this->hdr_textures[0].format)
                     .setDepthAttachmentFormat(vk::Format::eD32Sfloat)
             }
             .get()
         );
         vk_expect(result3, "Failed to create graphics pipeline");
-        this->device.destroyShaderModule(shader_module);
+        this->device->logical.destroyShaderModule(shader_module);
 
         this->pipeline = pipeline;
         this->pipeline_layout = pipeline_layout;
+    }
+
+    void create_hdr_image(uint32_t frame_index) {
+        if (this->hdr_textures.size() != FRAMES_IN_FLIGHT) {
+            this->hdr_textures.resize(FRAMES_IN_FLIGHT);
+        }
+
+        Texture texture = this->create_image(
+            vk::ImageCreateInfo()
+                .setImageType(vk::ImageType::e2D)
+                .setExtent(vk::Extent3D(this->swapchain.extent(), 1))
+                .setFormat(vk::Format::eR16G16B16A16Sfloat)
+                .setUsage(vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled)
+                .setMipLevels(1)
+                .setArrayLayers(1)
+                .setSamples(vk::SampleCountFlagBits::e1)
+                .setInitialLayout(vk::ImageLayout::eUndefined)
+                .setSharingMode(vk::SharingMode::eExclusive)
+                .setTiling(vk::ImageTiling::eOptimal)
+        );
+
+        if (!this->hdr_textures[frame_index].is_null()) {
+            this->hdr_textures[frame_index].destroy(this->device);
+        }
+
+        this->hdr_textures[frame_index] = texture;
     }
 
     void create_depth_image(uint32_t frame_index) {
@@ -720,39 +786,44 @@ private:
         Texture texture = this->create_image(
             vk::ImageCreateInfo()
                 .setImageType(vk::ImageType::e2D)
-                .setExtent(vk::Extent3D(this->swapchain.get_extent(), 1))
+                .setExtent(vk::Extent3D(this->swapchain.extent(), 1))
                 .setFormat(vk::Format::eD32Sfloat)
                 .setUsage(vk::ImageUsageFlagBits::eDepthStencilAttachment)
                 .setMipLevels(1)
                 .setArrayLayers(1)
                 .setSamples(vk::SampleCountFlagBits::e1)
-                .setQueueFamilyIndices(this->queue_family_index)
                 .setInitialLayout(vk::ImageLayout::eUndefined)
                 .setSharingMode(vk::SharingMode::eExclusive)
                 .setTiling(vk::ImageTiling::eOptimal)
         );
 
         if (!this->depth_textures[frame_index].is_null()) {
-            this->depth_textures[frame_index].destroy(this->device, this->allocator);
+            this->depth_textures[frame_index].destroy(this->device);
         }
 
         this->depth_textures[frame_index] = texture;
     }
 
-    void destroy_depth_textures() {
+    void destroy_target_textures() {
         for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
             if (!this->depth_textures[i].is_null()) {
-                this->depth_textures[i].destroy(this->device, this->allocator);
+                this->depth_textures[i].destroy(this->device);
+            }
+        }
+
+        for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+            if (!this->hdr_textures[i].is_null()) {
+                this->hdr_textures[i].destroy(this->device);
             }
         }
     }
 
     Texture create_image(const vk::ImageCreateInfo& info) {
-        return ::create_texture(this->device, this->allocator, info);
+        return ::create_texture(this->device, info);
     }
 
     ViewData get_view_data(const Camera& camera) {
-        vk::Extent2D viewport_size = this->swapchain.get_extent();
+        vk::Extent2D viewport_size = this->swapchain.extent();
         auto viewport_width = static_cast<float>(viewport_size.width);
         auto viewport_height = static_cast<float>(viewport_size.height);
 
@@ -762,7 +833,7 @@ private:
         };
     }
 
-    void update_scene_data(const Scene& scene) {
+    void update_scene_draw_data(const Scene& scene) {
         this->scene_data.view = this->get_view_data(scene.camera);
         this->scene_data.clear_color = scene.clear_color;
         this->scene_data.ambient_light = {
@@ -774,7 +845,7 @@ private:
         for (const auto& light: scene.point_lights) {
             this->scene_data.point_lights.push_back({
                 .position = light.position,
-                .radius = 1000.0f,
+                .radius = light.radius,
                 .color = light.color,
                 .intensity = light.intensity
             });
@@ -843,7 +914,9 @@ private:
         }
     }
 
-    FrameData write_frame_data() {
+    FrameData write_frame_data(const Scene& scene) {
+        this->update_scene_draw_data(scene);
+
         FrameSubBuffer view_data = this->frame_arena.add(scene_data.view).value();
         FrameSubBuffer light_data = this->frame_arena
             .add(LightData {
@@ -875,23 +948,10 @@ private:
     void record_frame_commands(
         vk::CommandBuffer command_buffer, 
         const SwapchainImage& image,
-        const FrameData& data
+        const Scene& scene
     ) {
-        DrawConstants draw_constants = {
-            .view_data = data.view_data.address(),
-            .light_data = data.light_data.address(),
-            .point_lights = data.point_lights.address(),
-            .directional_lights = data.dir_lights.address(),
-            .materials = this->material_manager.buffer_address(this->frame_index),
-            .instances = data.instances.address(),
-            .draws = data.draws.address()
-        };
-        command_buffer.pushConstants<DrawConstants>(
-            this->pipeline_layout,
-            vk::ShaderStageFlagBits::eVertex 
-                | vk::ShaderStageFlagBits::eFragment,
-            0, {draw_constants}
-        );
+        FrameData data = this->write_frame_data(scene);
+
         auto subresource_range = vk::ImageSubresourceRange()
             .setAspectMask(vk::ImageAspectFlagBits::eColor)
             .setBaseMipLevel(0)
@@ -899,6 +959,25 @@ private:
             .setBaseArrayLayer(0)
             .setLayerCount(1);
 
+        this->record_image_barrier(
+            command_buffer,
+            vk::ImageMemoryBarrier2()
+                .setImage(this->hdr_textures[this->frame_index])
+                .setSrcStageMask(vk::PipelineStageFlagBits2::eNone)
+                .setSrcAccessMask(vk::AccessFlagBits2::eNone)
+                .setDstStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput)
+                .setDstAccessMask(vk::AccessFlagBits2::eColorAttachmentWrite)
+                .setOldLayout(vk::ImageLayout::eUndefined)
+                .setNewLayout(vk::ImageLayout::eColorAttachmentOptimal)
+                .setSubresourceRange(
+                    vk::ImageSubresourceRange()
+                        .setAspectMask(vk::ImageAspectFlagBits::eColor)
+                        .setBaseMipLevel(0)
+                        .setLevelCount(1)
+                        .setBaseArrayLayer(0)
+                        .setLayerCount(1)
+                )
+        );
         this->record_image_barrier(
             command_buffer,
             vk::ImageMemoryBarrier2()
@@ -921,11 +1000,12 @@ private:
                         .setLayerCount(1)
                 )
         );
+        this->record_draw_commands(command_buffer, data);
         this->record_image_barrier(
             command_buffer,
             vk::ImageMemoryBarrier2()
                 .setImage(image.image)
-                .setSrcStageMask(vk::PipelineStageFlagBits2::eNone)
+                .setSrcStageMask(vk::PipelineStageFlagBits2::eFragmentShader)
                 .setSrcAccessMask(vk::AccessFlagBits2::eNone)
                 .setDstStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput)
                 .setDstAccessMask(vk::AccessFlagBits2::eColorAttachmentWrite)
@@ -933,7 +1013,26 @@ private:
                 .setNewLayout(vk::ImageLayout::eColorAttachmentOptimal)
                 .setSubresourceRange(subresource_range)
         );
-        this->record_draw_commands(command_buffer, image, data);
+        this->record_image_barrier(
+            command_buffer,
+            vk::ImageMemoryBarrier2()
+                .setImage(this->hdr_textures[this->frame_index])
+                .setSrcStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput)
+                .setSrcAccessMask(vk::AccessFlagBits2::eColorAttachmentWrite)
+                .setDstStageMask(vk::PipelineStageFlagBits2::eFragmentShader)
+                .setDstAccessMask(vk::AccessFlagBits2::eShaderSampledRead)
+                .setOldLayout(vk::ImageLayout::eColorAttachmentOptimal)
+                .setNewLayout(vk::ImageLayout::eShaderReadOnlyOptimal)
+                .setSubresourceRange(
+                    vk::ImageSubresourceRange()
+                        .setAspectMask(vk::ImageAspectFlagBits::eColor)
+                        .setBaseMipLevel(0)
+                        .setLevelCount(1)
+                        .setBaseArrayLayer(0)
+                        .setLayerCount(1)
+                )
+        );
+        this->record_tonemap_commands(command_buffer, image, scene);
         this->record_image_barrier(
             command_buffer,
             vk::ImageMemoryBarrier2()
@@ -948,13 +1047,25 @@ private:
         );
     }
 
-    void record_draw_commands(
-        vk::CommandBuffer command_buffer, 
-        const SwapchainImage& image,
-        const FrameData& data
-    ) {
+    void record_draw_commands(vk::CommandBuffer command_buffer, const FrameData& data) {
+        DrawConstants draw_constants = {
+            .view_data = data.view_data.address(),
+            .light_data = data.light_data.address(),
+            .point_lights = data.point_lights.address(),
+            .directional_lights = data.dir_lights.address(),
+            .materials = this->material_manager.buffer_address(this->frame_index),
+            .instances = data.instances.address(),
+            .draws = data.draws.address()
+        };
+        command_buffer.pushConstants<DrawConstants>(
+            this->pipeline_layout,
+            vk::ShaderStageFlagBits::eVertex 
+                | vk::ShaderStageFlagBits::eFragment,
+            0, {draw_constants}
+        );
+
         auto color_attachment = vk::RenderingAttachmentInfo()
-            .setImageView(image.view)
+            .setImageView(this->hdr_textures[this->frame_index].view)
             .setImageLayout(vk::ImageLayout::eColorAttachmentOptimal)
             .setClearValue(vk::ClearColorValue(
                 data.clear_color.r, 
@@ -976,11 +1087,11 @@ private:
             .setLayerCount(1)
             .setColorAttachments(color_attachment)
             .setPDepthAttachment(&depth_attachment)
-            .setRenderArea(this->swapchain.get_full_area());
+            .setRenderArea(this->swapchain.full_area());
 
         command_buffer.beginRendering(rendering);
-        command_buffer.setViewport(0, this->swapchain.get_full_viewport());
-        command_buffer.setScissor(0, this->swapchain.get_full_area());
+        command_buffer.setViewport(0, this->swapchain.full_viewport());
+        command_buffer.setScissor(0, this->swapchain.full_area());
         command_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, this->pipeline);
         command_buffer.bindDescriptorSets(
             vk::PipelineBindPoint::eGraphics,
@@ -996,6 +1107,40 @@ private:
                 sizeof(vk::DrawIndexedIndirectCommand)
             );
         }
+        command_buffer.endRendering();
+    }
+
+    void record_tonemap_commands(
+        vk::CommandBuffer command_buffer, 
+        const SwapchainImage& image,
+        const Scene& scene
+    ) {
+        command_buffer.pushConstants<TonemapConstants>(
+            this->tonemap_pipeline_layout,
+            vk::ShaderStageFlagBits::eFragment,
+            0, {TonemapConstants(scene.post.tonemap, scene.camera.film.exposure)}
+        );
+        auto color_attachment = vk::RenderingAttachmentInfo()
+            .setImageView(image.view)
+            .setImageLayout(vk::ImageLayout::eColorAttachmentOptimal)
+            .setLoadOp(vk::AttachmentLoadOp::eDontCare)
+            .setStoreOp(vk::AttachmentStoreOp::eStore);
+
+        auto rendering = vk::RenderingInfo()
+            .setLayerCount(1)
+            .setColorAttachments(color_attachment)
+            .setRenderArea(this->swapchain.full_area());
+
+        command_buffer.beginRendering(rendering);
+        command_buffer.setViewport(0, this->swapchain.full_viewport());
+        command_buffer.setScissor(0, this->swapchain.full_area());
+        command_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, this->tonemap_pipeline);
+        command_buffer.bindDescriptorSets(
+            vk::PipelineBindPoint::eGraphics,
+            this->tonemap_pipeline_layout, 0,
+            {this->tonemap_sets[this->frame_index]}, {}
+        );
+        command_buffer.draw(3, 1, 0, 0);
         command_buffer.endRendering();
     }
 
@@ -1031,7 +1176,7 @@ private:
             .setStageMask(vk::PipelineStageFlagBits2::eAllCommands);
 
         vk_expect(
-            this->queue.submit2(
+            this->device->graphics_queue.submit2(
                 vk::SubmitInfo2()
                     .setWaitSemaphoreInfos(wait_info)
                     .setSignalSemaphoreInfos(signal_info)
@@ -1042,17 +1187,13 @@ private:
         );
     }
 
-    vk::Instance instance;
-    vk::DebugUtilsMessengerEXT debug_messenger = nullptr;
-    vk::PhysicalDevice physical_device;
-    vk::Device device;
-    vk::Queue queue;
-    uint32_t queue_family_index = 0;
-    vma::Allocator allocator;
+    InstanceHandle instance;
+    DeviceHandle device;
     Swapchain swapchain;
     SwapchainConfigureInfo swapchain_info;
     bool should_reconfigure_swapchain = false;
 
+    std::vector<Texture> hdr_textures;
     std::vector<Texture> depth_textures;
 
     std::vector<vk::Fence> fences;              // One per frame in flight
@@ -1066,13 +1207,20 @@ private:
 
     vk::Pipeline pipeline;
     vk::PipelineLayout pipeline_layout;
+    
+    vk::Pipeline tonemap_pipeline;
+    vk::PipelineLayout tonemap_pipeline_layout;
+    vk::DescriptorPool tonemap_descriptor_pool;
+    vk::DescriptorSetLayout tonemap_set_layout;
+    std::vector<vk::DescriptorSet> tonemap_sets;
+    vk::Sampler tonemap_sampler;
 
     Uploader uploader;
     FrameArenaBuffer frame_arena;
     TextureManager texture_manager;
     MaterialManager material_manager;
     MeshManager mesh_manager;
-    SceneData scene_data;
+    SceneDrawData scene_data;
 };
 
 Renderer::Renderer() = default;

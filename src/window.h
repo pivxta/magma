@@ -24,7 +24,6 @@ public:
 
     Window(const Window&) = delete;
     const Window& operator=(const Window&) = delete;
-
     Window(Window&& other) noexcept;
     Window& operator=(Window&& other) noexcept;
 

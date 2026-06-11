@@ -1,17 +1,13 @@
 #include "texture.h"
 #include "vk_error.h"
 
-Texture create_texture(
-    vk::Device device,
-    vma::Allocator allocator,
-    const vk::ImageCreateInfo& info
-) {
+Texture create_texture(const DeviceHandle& device, const vk::ImageCreateInfo& info) {
     auto alloc_info = vma::AllocationCreateInfo().setUsage(vma::MemoryUsage::eGpuOnly);
-    auto [result1, resources] = allocator.createImage(info, alloc_info);
+    auto [result1, resources] = device->allocator.createImage(info, alloc_info);
     vk_expect(result1, "Failed to create image");
     auto [alloc, image] = resources;
 
-    auto [result2, view] = device.createImageView(
+    auto [result2, view] = device->logical.createImageView(
         vk::ImageViewCreateInfo()
             .setImage(image)
             .setFormat(info.format)
@@ -32,7 +28,9 @@ Texture create_texture(
         .image = resources.second,
         .allocation = resources.first,
         .view = view,
+        .array_layers = info.arrayLayers,
         .mip_levels = info.mipLevels,
+        .samples = info.samples,
         .extent = info.extent,
         .format = info.format,
     };

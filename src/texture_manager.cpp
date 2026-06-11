@@ -70,31 +70,32 @@ static vk::DescriptorSet create_set(
 }
 
 TextureManager::TextureManager(
-    vk::Device device, 
-    vma::Allocator allocator,
+    DeviceHandle device,
     Uploader& uploader,
     uint32_t frames_in_flight,
     uint32_t max_textures
 ):
-    device(device),
-    allocator(allocator),
+    device(std::move(device)),
     textures(max_textures),
     frames_in_flight(frames_in_flight)
 {
     assert(max_textures > static_cast<uint32_t>(TextureFallback::Count));
-    this->desc_pool = create_descriptor_pool(device, max_textures);
-    this->desc_set_layout = create_set_layout(device, max_textures);
-    this->desc_set = create_set(device, this->desc_pool, this->desc_set_layout);
-    this->create_samplers(device);
+    this->desc_pool = create_descriptor_pool(this->device->logical, max_textures);
+    this->desc_set_layout = create_set_layout(this->device->logical, max_textures);
+    this->desc_set = create_set(this->device->logical, this->desc_pool, this->desc_set_layout);
+    this->create_samplers();
     this->create_fallbacks(uploader);
 }
 
-void TextureManager::destroy() {
-    this->device.destroyDescriptorSetLayout(this->desc_set_layout);
-    this->device.destroyDescriptorPool(this->desc_pool);
-    this->destroy_samplers(this->device);
+TextureManager::~TextureManager() {
+    if (!this->device) {
+        return;
+    }
+    this->device->logical.destroyDescriptorSetLayout(this->desc_set_layout);
+    this->device->logical.destroyDescriptorPool(this->desc_pool);
+    this->destroy_samplers();
     this->textures.clear([&](Texture& texture) {
-        texture.destroy(this->device, this->allocator);
+        texture.destroy(this->device);
     });
 }
 
@@ -231,8 +232,7 @@ static vk::Format get_image_format(ImageFormat image_format) {
 }
 
 static Texture create_texture_from_image(
-    vk::Device device, 
-    vma::Allocator allocator,
+    const DeviceHandle& device,
     const Image& src
 ) {
     vk::Extent3D extent = vk::Extent3D(src.width, src.height, 1);
@@ -242,7 +242,6 @@ static Texture create_texture_from_image(
 
     return create_texture(
         device,
-        allocator,
         vk::ImageCreateInfo()
             .setImageType(vk::ImageType::e2D)
             .setExtent(extent)
@@ -266,7 +265,6 @@ std::optional<SlotKey<Texture>> TextureManager::create_texture(
     if (auto key = this->textures.reserve(); key.has_value()) {
         Texture texture = create_texture_from_image(
             this->device,
-            this->allocator,
             image
         );
         uploader.upload_image(
@@ -279,7 +277,7 @@ std::optional<SlotKey<Texture>> TextureManager::create_texture(
         auto info = vk::DescriptorImageInfo()
             .setImageView(texture.view)
             .setImageLayout(vk::ImageLayout::eShaderReadOnlyOptimal);
-        device.updateDescriptorSets(
+        this->device->logical.updateDescriptorSets(
             vk::WriteDescriptorSet()
                 .setDstSet(this->desc_set)
                 .setDstBinding(0)
@@ -296,7 +294,7 @@ std::optional<SlotKey<Texture>> TextureManager::create_texture(
 
 void TextureManager::destroy_texture(SlotKey<Texture> key) {
     this->textures.free(key, [&](Texture& texture) {
-        texture.destroy(this->device, this->allocator);
+        texture.destroy(this->device);
         texture = Texture{};
     });
 }
@@ -337,6 +335,8 @@ static vk::Sampler create_sampler(vk::Device device, Sampler type) {
         .setAddressModeW(address_mode)
         .setMinFilter(vk::Filter::eLinear)
         .setMipmapMode(vk::SamplerMipmapMode::eLinear)
+        .setAnisotropyEnable(true)
+        .setMaxAnisotropy(3)
         .setMinLod(0.0f)
         .setMaxLod(128.0f);
 
@@ -345,7 +345,7 @@ static vk::Sampler create_sampler(vk::Device device, Sampler type) {
     return sampler;
 }
 
-void TextureManager::create_samplers(vk::Device device) {
+void TextureManager::create_samplers() {
     std::array types = {
         Sampler::NearestRepeat,
         Sampler::NearestMirrored,
@@ -355,14 +355,13 @@ void TextureManager::create_samplers(vk::Device device) {
         Sampler::LinearClamp
     };
     for (auto type: types) {
-        this->samplers[get_sampler_index(type)] = create_sampler(device, type);
+        this->samplers[get_sampler_index(type)] = create_sampler(this->device->logical, type);
     }
-    this->bind_samplers(this->device, this->desc_set, types);
+    this->bind_samplers(this->desc_set, types);
 }
 
 void TextureManager::bind_samplers(
-    vk::Device device, 
-    vk::DescriptorSet set, 
+    vk::DescriptorSet set,
     std::span<Sampler> types
 ) {
     std::vector<vk::DescriptorImageInfo> infos;
@@ -387,13 +386,13 @@ void TextureManager::bind_samplers(
                 .setImageInfo(infos.back())
         );
     }
-    device.updateDescriptorSets(writes, {});
+    this->device->logical.updateDescriptorSets(writes, {});
 }
 
-void TextureManager::destroy_samplers(vk::Device device) {
+void TextureManager::destroy_samplers() {
     for (auto sampler: this->samplers) {
         if (sampler != vk::Sampler()) {
-            device.destroySampler(sampler);
+            this->device->logical.destroySampler(sampler);
         }
     }
 }
@@ -460,6 +459,7 @@ void TextureManager::create_fallbacks(Uploader& uploader) {
         TextureFallback::ColorWhite,
         TextureFallback::ColorError,
         TextureFallback::Normal,
+        TextureFallback::Displacement,
         TextureFallback::AoRoughnessMetallic
     };
     for (auto type: types) {

@@ -1,27 +1,30 @@
 #pragma once
 #include <vulkan/vulkan.hpp>
 #include <vk_mem_alloc.hpp>
+#include "device.h"
 
 struct Texture {
     vk::Image image;
     vma::Allocation allocation;
     vk::ImageView view;
 
-    uint32_t mip_levels;
+    uint32_t array_layers = 0;
+    uint32_t mip_levels = 0;
+    vk::SampleCountFlags samples = {};
     vk::Extent3D extent;
-    vk::Format format;
-
-    operator vk::Image() const {
-        return this->image;
-    }
+    vk::Format format = vk::Format::eUndefined;
 
     bool is_null() const {
         return this->image == vk::Image();
     }
 
-    void destroy(vk::Device device, vma::Allocator allocator) {
-        device.destroyImageView(this->view);
-        allocator.destroyImage(this->image, this->allocation);
+    void destroy(const DeviceHandle& device) {
+        device->logical.destroyImageView(this->view);
+        device->allocator.destroyImage(this->image, this->allocation);
+    }
+
+    operator vk::Image() const {
+        return this->image;
     }
 };
 
@@ -45,8 +48,4 @@ static inline vk::ImageAspectFlags get_default_aspect_flags(vk::Format format) {
     }
 }
 
-Texture create_texture(
-    vk::Device device,
-    vma::Allocator allocator,
-    const vk::ImageCreateInfo& info
-);
+Texture create_texture(const DeviceHandle& device, const vk::ImageCreateInfo& info);

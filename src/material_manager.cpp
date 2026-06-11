@@ -61,8 +61,7 @@ static MaterialData get_material_data(const Material& material, const TextureMan
 }
 
 static std::vector<Buffer> create_buffers(
-    vk::Device device,
-    vma::Allocator allocator,
+    const DeviceHandle& device,
     uint32_t frames_in_flight,
     uint32_t max_materials
 ) {
@@ -71,8 +70,7 @@ static std::vector<Buffer> create_buffers(
     for (uint32_t i = 0; i < frames_in_flight; i++) {
         buffers.push_back(create_mapped_buffer(
             device,
-            allocator, 
-            vk::BufferUsageFlagBits::eStorageBuffer 
+            vk::BufferUsageFlagBits::eStorageBuffer
                 | vk::BufferUsageFlagBits::eShaderDeviceAddress,
             max_materials * sizeof(MaterialData)
         ));
@@ -81,28 +79,28 @@ static std::vector<Buffer> create_buffers(
 }
 
 MaterialManager::MaterialManager(
-    vk::Device device, 
-    vma::Allocator allocator, 
+    DeviceHandle device,
     uint32_t frames_in_flight,
     uint32_t max_materials
 ):
-    device(device),
-    allocator(allocator),
+    device(std::move(device)),
     dirty(frames_in_flight),
     materials(max_materials)
 {
     this->buffers = create_buffers(
-        device, 
-        allocator, 
-        frames_in_flight, 
+        this->device,
+        frames_in_flight,
         max_materials
     );
     this->fallback = this->add(Material {});
 }
 
-void MaterialManager::destroy() {
+MaterialManager::~MaterialManager() {
+    if (!this->device) {
+        return;
+    }
     for (auto& buffer: this->buffers) {
-        buffer.destroy(this->allocator);
+        buffer.destroy(this->device);
     }
 }
 
@@ -156,7 +154,7 @@ void MaterialManager::update_dirty(const TextureManager& texture_manager, uint32
         }
     }
     this->dirty[frame_index].clear();
-    this->buffers[frame_index].flush(this->allocator, write_start, write_end - write_start);
+    this->buffers[frame_index].flush(this->device, write_start, write_end - write_start);
 }
 
 MaterialId MaterialManager::add(const Material& material) {

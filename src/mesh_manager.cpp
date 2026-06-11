@@ -4,16 +4,14 @@ static constexpr vk::DeviceSize VERTEX_ALIGNMENT = 16;
 static constexpr vk::DeviceSize INDEX_ALIGNMENT = sizeof(uint32_t);
 
 MeshManager::MeshManager(
-    vk::Device device, 
-    vma::Allocator allocator,
+    DeviceHandle device,
     uint32_t frames_in_flight,
     vk::DeviceSize vertex_heap_capacity,
     vk::DeviceSize index_heap_capacity
 ):
     vertex_heap(
-        device, 
-        allocator, 
-        frames_in_flight, 
+        device,
+        frames_in_flight,
         VERTEX_ALIGNMENT,
         vk::BufferCreateInfo()
             .setSize(vertex_heap_capacity)
@@ -27,9 +25,8 @@ MeshManager::MeshManager(
             .setUsage(vma::MemoryUsage::eGpuOnly)
     ),
     index_heap(
-        device, 
-        allocator, 
-        frames_in_flight, 
+        std::move(device),
+        frames_in_flight,
         INDEX_ALIGNMENT,
         vk::BufferCreateInfo()
             .setSize(index_heap_capacity)
@@ -42,11 +39,6 @@ MeshManager::MeshManager(
             .setUsage(vma::MemoryUsage::eGpuOnly)
     )
 {}
-
-void MeshManager::destroy() {
-    this->index_heap.destroy();
-    this->vertex_heap.destroy();
-}
 
 SlotKey<MeshManager::MeshSubBuffers> MeshManager::get_slot_key(MeshId id) {
     return {
@@ -173,16 +165,16 @@ std::optional<MeshManager::MeshSubBuffers> MeshManager::create_sub_buffers(
             .set_buffer(vertices_buffer->buffer())
             .set_offset(vertices_buffer->buffer_offset())
             .set_memory(vertices.value())
-            .set_dst_access_mask(vk::AccessFlagBits2::eShaderRead)
-            .set_dst_stage_mask(vk::PipelineStageFlagBits2::eVertexShader)
+            .set_usage_access(vk::AccessFlagBits2::eShaderRead)
+            .set_usage_stage(vk::PipelineStageFlagBits2::eVertexShader)
     );
     uploader.upload_buffer(
         BufferUpload()
             .set_buffer(indices_buffer->buffer())
             .set_offset(indices_buffer->buffer_offset())
             .set_memory(indices)
-            .set_dst_access_mask(vk::AccessFlagBits2::eIndexRead)
-            .set_dst_stage_mask(vk::PipelineStageFlagBits2::eIndexInput)
+            .set_usage_access(vk::AccessFlagBits2::eIndexRead)
+            .set_usage_stage(vk::PipelineStageFlagBits2::eIndexInput)
     );
 
     return MeshSubBuffers{

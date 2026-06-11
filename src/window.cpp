@@ -313,13 +313,19 @@ struct Window::Inner: Target {
     WindowSize logical_size() const {
         int width, height;
         glfwGetWindowSize(this->window, &width, &height);
-        return { static_cast<uint32_t>(width), static_cast<uint32_t>(height) };
+        return { 
+            .width = static_cast<uint32_t>(width), 
+            .height = static_cast<uint32_t>(height) 
+        };
     }
 
     WindowSize physical_size() const {
         int width, height;
         glfwGetFramebufferSize(this->window, &width, &height);
-        return { static_cast<uint32_t>(width), static_cast<uint32_t>(height) };
+        return { 
+            .width = static_cast<uint32_t>(width), 
+            .height = static_cast<uint32_t>(height) 
+        };
     }
 
     void set_cursor_locked(bool locked) {

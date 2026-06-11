@@ -52,9 +52,24 @@ static glm::mat4 get_view_to_clip(const Projection& projection, float width, flo
     }, projection);
 }
 
+struct Film {
+    float exposure = 1.0f;
+
+    Film() = default;
+    Film(float exposure) {
+        this->exposure = exposure;
+    }
+
+    Film& set_exposure(float exposure) {
+        this->exposure = exposure;
+        return *this;
+    }
+};
+
 struct Camera {
     Transform transform;
     Projection projection = PerspectiveProjection();
+    Film film;
     bool active = true;
 
     Camera& set_transform(const Transform& transform) {

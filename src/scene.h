@@ -1,10 +1,12 @@
 #pragma once
 #include "camera.h"
 #include "light.h"
-#include "meshobject.h"
+#include "mesh_object.h"
+#include "post_processing.h"
 
 struct Scene {
     Camera camera;
+    PostProcessing post;
     AmbientLight ambient_light;
     glm::vec3 clear_color;
 

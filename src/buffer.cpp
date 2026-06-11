@@ -1,20 +1,21 @@
 #include "buffer.h"
+#include "vk_error.h"
 
 Buffer create_buffer(
-    vk::Device device,
-    vma::Allocator allocator,
+    const DeviceHandle& device,
     vk::BufferCreateInfo buffer_info,
     const vma::AllocationCreateInfo& alloc_info
 ) {
     vma::AllocationInfo info;
-    auto [result, resources] = allocator.createBuffer(buffer_info, alloc_info, &info);
+    auto [result, resources] = device->allocator.createBuffer(buffer_info, alloc_info, &info);
     vk_expect(result, "Failed to create buffer");
 
     vk::Buffer buffer = resources.second;
     vma::Allocation allocation = resources.first;
     vk::DeviceAddress address = 0;
     if (buffer_info.usage & vk::BufferUsageFlagBits::eShaderDeviceAddress) {
-        address = device.getBufferAddress(vk::BufferDeviceAddressInfo().setBuffer(buffer));
+        address = device->logical
+            .getBufferAddress(vk::BufferDeviceAddressInfo().setBuffer(buffer));
     }
 
     return {
@@ -27,14 +28,12 @@ Buffer create_buffer(
 }
 
 Buffer create_gpu_buffer(
-    vk::Device device,
-    vma::Allocator allocator,
+    const DeviceHandle& device,
     vk::BufferUsageFlags usage, 
     vk::DeviceSize size
 ) {
     return create_buffer(
         device,
-        allocator,
         vk::BufferCreateInfo()
             .setSharingMode(vk::SharingMode::eExclusive)
             .setSize(size)
@@ -45,14 +44,12 @@ Buffer create_gpu_buffer(
 }
 
 Buffer create_mapped_buffer(
-    vk::Device device,
-    vma::Allocator allocator,
+    const DeviceHandle& device,
     vk::BufferUsageFlags usage, 
     vk::DeviceSize size
 ) {
     return create_buffer(
         device,
-        allocator,
         vk::BufferCreateInfo()
             .setSharingMode(vk::SharingMode::eExclusive)
             .setSize(size)
@@ -68,14 +65,12 @@ Buffer create_mapped_buffer(
 
 
 Buffer create_staging_buffer(
-    vk::Device device,
-    vma::Allocator allocator,
+    const DeviceHandle& device,
     vk::BufferUsageFlags usage, 
     vk::DeviceSize size
 ) {
     return create_buffer(
         device,
-        allocator,
         vk::BufferCreateInfo()
             .setSharingMode(vk::SharingMode::eExclusive)
             .setSize(size)

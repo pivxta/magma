@@ -1,6 +1,7 @@
 #pragma once
 #include <memory>
 #include <vulkan/vulkan.hpp>
+#include "device.h"
 
 struct SwapchainConfigureInfo {
     vk::PresentModeKHR present_mode = vk::PresentModeKHR::eMailbox;
@@ -36,24 +37,31 @@ class Target;
 class Swapchain {
 public:
     Swapchain() = default;
-    Swapchain(vk::Instance instance, const std::shared_ptr<Target>& target);
+    Swapchain(
+        const InstanceHandle& instance,
+        const std::shared_ptr<Target>& target
+    );
+    ~Swapchain();
 
-    void destroy(vk::Device device);
+    Swapchain(const Swapchain&) = delete;
+    Swapchain& operator=(const Swapchain&) = delete;
+    Swapchain(Swapchain&& other) noexcept;
+    Swapchain& operator=(Swapchain&& other) noexcept;
 
-    vk::SurfaceKHR get_surface() {
-        return this->surface;
+    vk::SurfaceKHR surface() const {
+        return this->surface_;
     }
 
-    vk::Extent2D get_extent() const {
-        return this->extent;
+    vk::Extent2D extent() const {
+        return this->extent_;
     }
 
-    vk::Format get_format() const {
-        return this->format;
+    vk::Format format() const {
+        return this->format_;
     }
 
-    vk::Viewport get_full_viewport() const {
-        vk::Extent2D target_extent = this->get_extent();
+    vk::Viewport full_viewport() const {
+        vk::Extent2D target_extent = this->extent();
         return vk::Viewport()
             .setX(0.0f)
             .setY(0.0f)
@@ -63,32 +71,24 @@ public:
             .setMaxDepth(1.0f);
     }
 
-    vk::Rect2D get_full_area() const {
-        return {{0, 0}, this->get_extent()};
+    vk::Rect2D full_area() const {
+        return {{0, 0}, this->extent()};
     }
     
-    void configure(
-        vk::PhysicalDevice physical_device, 
-        vk::Device device, 
-        const SwapchainConfigureInfo& info
-    );
-
-    std::tuple<vk::Result, SwapchainImage> acquire_image(
-        vk::Device device, 
-        vk::Semaphore image_available
-    );
-
-    vk::Result present(vk::Queue queue, const SwapchainImage& image);
+    vk::Result configure(const DeviceHandle& device, const SwapchainConfigureInfo& info);
+    vk::Result present(const SwapchainImage& image);
+    std::tuple<vk::Result, SwapchainImage> acquire_image(vk::Semaphore image_available);
 
 private:
-    vk::Instance instance;
+    InstanceHandle instance;
+    DeviceHandle device;
     std::shared_ptr<Target> target;
 
-    vk::Extent2D extent;
-    vk::Format format = vk::Format::eUndefined;
+    vk::Extent2D extent_;
+    vk::Format format_ = vk::Format::eUndefined;
     std::vector<vk::Image> images;
 
-    vk::SurfaceKHR surface;
+    vk::SurfaceKHR surface_;
     vk::SwapchainKHR swapchain;
     std::vector<vk::ImageView> views;
     std::vector<vk::Semaphore> presentable;

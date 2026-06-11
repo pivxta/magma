@@ -50,7 +50,7 @@ public:
             };    
         }
 
-        std::sort(this->frame_times.begin(), this->frame_times.end());
+        std::ranges::sort(this->frame_times.begin(), this->frame_times.end());
 
         double avg = 
             std::accumulate(this->frame_times.begin(), this->frame_times.end(), 0.0) 

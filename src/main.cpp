@@ -10,7 +10,7 @@
 #include "scene.h"
 #include "performance.h"
 #include "time.h"
-#include "meshpreset.h"
+#include "mesh_preset.h"
 #include "image.h"
 
 struct ControllerSettings {
@@ -171,69 +171,61 @@ private:
     void start() {
         this->window.set_cursor_locked(true);
 
-        TextureId rocks_base_color;
-        TextureId rocks_normal_map;
-        TextureId rocks_aorm_map;
-        TextureId rocks_displacement_map;
-
-        TextureId paving_base_color;
-        TextureId paving_normal_map;
-        TextureId paving_aorm_map;
-        TextureId paving_displacement_map;
+        Material rocks_material;
+        Material paving_material;
+        Material metal_material;
         
         if (auto image = Image::load("images/rocks.jpg"); image != std::nullopt) {
-            rocks_base_color = this->renderer.add_texture(image.value());
+            rocks_material.set_base_color_texture(this->renderer.add_texture(image.value()));
         }
         auto linear_load = ImageLoadInfo().set_colorspace(ImageColorspace::Linear);
         if (auto image = Image::load("images/rocksaorm.png", linear_load); image != std::nullopt) {
-            rocks_aorm_map = this->renderer.add_texture(image.value());
+            rocks_material.set_ao_roughness_metallic_map(this->renderer.add_texture(image.value()));
         }
         if (auto image = Image::load("images/rocksnormal.jpg", linear_load); image != std::nullopt) {
-            rocks_normal_map = this->renderer.add_texture(image.value());
+            rocks_material.set_normal_map(this->renderer.add_texture(image.value()));
         }
         if (auto image = Image::load("images/rocksdisplacement.jpg", linear_load); image != std::nullopt) {
-            rocks_displacement_map = this->renderer.add_texture(image.value());
+            rocks_material.set_displacement_map(this->renderer.add_texture(image.value()));
         }
 
         if (auto image = Image::load("images/pavingstones.jpg"); image != std::nullopt) {
-            paving_base_color = this->renderer.add_texture(image.value());
+            paving_material.set_base_color_texture(this->renderer.add_texture(image.value()));
         }
         if (auto image = Image::load("images/pavingstonesaorm.png", linear_load); image != std::nullopt) {
-            paving_aorm_map = this->renderer.add_texture(image.value());
+            paving_material.set_ao_roughness_metallic_map(this->renderer.add_texture(image.value()));
         }
         if (auto image = Image::load("images/pavingstonesnormal.jpg", linear_load); image != std::nullopt) {
-            paving_normal_map = this->renderer.add_texture(image.value());
+            paving_material.set_normal_map(this->renderer.add_texture(image.value()));
         }
         if (auto image = Image::load("images/pavingstonesdisplacement.jpg", linear_load); image != std::nullopt) {
-            paving_displacement_map = this->renderer.add_texture(image.value());
+            paving_material.set_displacement_map(this->renderer.add_texture(image.value()));
+        }
+
+        if (auto image = Image::load("images/metal.jpg"); image != std::nullopt) {
+            metal_material.set_base_color_texture(this->renderer.add_texture(image.value()));
+        }
+        if (auto image = Image::load("images/metalaorm.png", linear_load); image != std::nullopt) {
+            metal_material.set_ao_roughness_metallic_map(this->renderer.add_texture(image.value()));
+        }
+        if (auto image = Image::load("images/metalnormal.jpg", linear_load); image != std::nullopt) {
+            metal_material.set_normal_map(this->renderer.add_texture(image.value()));
+        }
+        if (auto image = Image::load("images/metaldisplacement.jpg", linear_load); image != std::nullopt) {
+            metal_material.set_displacement_map(this->renderer.add_texture(image.value()));
         }
         
-        MaterialId rocks = this->renderer.add_material(
-            Material()
-                .set_base_color_texture(rocks_base_color)
-                .set_normal_map(rocks_normal_map)
-                .set_displacement_map(rocks_displacement_map)
-                .set_ao_roughness_metallic_map(rocks_aorm_map)
-        );
-
-        MaterialId paving = this->renderer.add_material(
-            Material()
-                .set_base_color_texture(paving_base_color)
-                .set_normal_map(paving_normal_map)
-                .set_displacement_map(paving_displacement_map)
-                .set_ao_roughness_metallic_map(paving_aorm_map)
-        );
+        MaterialId metal = this->renderer.add_material(metal_material);
+        MaterialId rocks = this->renderer.add_material(rocks_material);
+        MaterialId paving = this->renderer.add_material(paving_material);
 
         MeshId floor = this->renderer.add_mesh(Quad(1.0f).to_mesh());
-        MeshId cylinder = this->renderer.add_mesh(
-            Cylinder(2.0f, 0.5f)
-                .set_shading(ShadingMode::Flat)
-                .to_mesh()
-        );
+        MeshId sphere = this->renderer.add_mesh(Sphere(0.4f).to_mesh());
+        MeshId cylinder = this->renderer.add_mesh(Cylinder(1.0f, 0.2f).to_mesh());
 
-        this->scene.clear_color = glm::vec3(0.4f, 0.6f, 1.05f);
+        this->scene.clear_color = glm::vec3(0.1f, 0.1f, 0.1f);
         this->scene.ambient_light = AmbientLight()
-            .set_color(glm::vec3(0.5f, 0.5f, 0.5f))
+            .set_color(glm::vec3(0.1f, 0.1f, 0.1f))
             .set_illuminance(1.0f);
 
         for (int i = 0; i < 4; i++) {
@@ -242,27 +234,47 @@ private:
                     MeshObject()
                         .set_mesh(floor)
                         .set_material(paving)
-                        .set_transform(Transform(float(i) - 2.0f, 2.0f, float(j) - 2.0f))
+                        .set_transform(Transform(
+                            static_cast<float>(i) - 2.0f, 
+                            2.0f, 
+                            static_cast<float>(j) - 2.0f
+                        ))
                 );
             }
         }
-            
-        /*
+
         this->scene.add(
             MeshObject()
                 .set_mesh(cylinder)
-                .set_material(rocks)
-                .set_transform(Transform(0.0f, 1.0f, 0.0f))
+                .set_material(metal)
+                .set_transform(Transform(0.0f, 1.5f, 1.0f))
         );
-        */
         this->scene.add(
-            DirectionalLight()
-                .set_illuminance(10.0f)
-                .set_direction(glm::vec3(1.0f, 2.0f, 0.5f))
+            MeshObject()
+                .set_mesh(sphere)
+                .set_material(rocks)
+                .set_transform(Transform(-2.0f, 1.6f, -1.0f))
+        );
+
+        this->scene.add(
+            PointLight()
+                .set_intensity(1000.0f)
+                .set_color(glm::vec3(1.0f))
+                .set_radius(8.0f)
+                .set_position(glm::vec3(0.0f, -1.0f, 0.0f))
         );
     }
 
     void update(float delta_time) {
+        if (this->input.key_just_pressed(Key::T)) {
+            if (std::get_if<DisabledTonemap>(&this->scene.post.tonemap) != nullptr) {
+                this->scene.post.tonemap = ReinhardTonemap();
+            } else if (std::get_if<AgxTonemap>(&this->scene.post.tonemap) != nullptr) {
+                this->scene.post.tonemap = DisabledTonemap();
+            } else {
+                this->scene.post.tonemap = AgxTonemap();
+            }
+        }
         this->poll_app_actions();
         this->control_camera(delta_time);
     }

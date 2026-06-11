@@ -1,25 +1,27 @@
 #include "uploader.h"
+#include <spdlog/spdlog.h>
 
 Uploader::Uploader(
-    vk::Device device,
-    vma::Allocator allocator, 
-    uint32_t frames_in_flight, 
+    DeviceHandle device,
+    uint32_t frames_in_flight,
     vk::DeviceSize capacity_per_fif
 ):
+    device(std::move(device)),
     arena(capacity_per_fif)
 {
-    this->allocator = allocator;
     this->stride = capacity_per_fif;
     this->buffer = create_staging_buffer(
-        device,
-        this->allocator, 
+        this->device,
         vk::BufferUsageFlagBits::eTransferSrc,
         capacity_per_fif * frames_in_flight
     );
 }
 
-void Uploader::destroy() {
-    this->buffer.destroy(this->allocator);
+Uploader::~Uploader() {
+    if (!this->device) {
+        return;
+    }
+    this->buffer.destroy(this->device);
 }
 
 bool Uploader::upload_buffer(BufferUpload upload) {
@@ -38,7 +40,7 @@ bool Uploader::upload_buffer(BufferUpload upload) {
     Buffer buffer = *upload.buffer;
     if (buffer.mapped_data != nullptr) {
         memcpy(buffer.mapped(upload.offset), upload.memory, upload.size);
-        buffer.flush(this->allocator, upload.offset, upload.size);
+        buffer.flush(this->device, upload.offset, upload.size);
         return true;
     }
 
@@ -49,14 +51,14 @@ bool Uploader::upload_buffer(BufferUpload upload) {
 
     vk::DeviceSize buffer_offset = this->stride * this->frame_index + staging_range->offset;
     memcpy(this->buffer.mapped(buffer_offset), upload.memory, upload.size);
-    this->buffer.flush(this->allocator, buffer_offset, upload.size);
+    this->buffer.flush(this->device, buffer_offset, upload.size);
 
     this->pending_buffers.push_back(PendingBufferUpload{
         .buffer = buffer,
         .size = upload.size,
         .offset = upload.offset,
-        .dst_access_mask = upload.dst_access_mask,
-        .dst_stage_mask = upload.dst_stage_mask,
+        .usage_access = upload.usage_access,
+        .usage_stage = upload.usage_stage,
         .staging_range = staging_range.value(),
         .frame_index = this->frame_index
     });
@@ -80,7 +82,7 @@ bool Uploader::upload_image(ImageUpload upload) {
 
     vk::DeviceSize buffer_offset = this->stride * this->frame_index + staging_range->offset;
     memcpy(this->buffer.mapped(buffer_offset), upload.image->bytes.data(), size);
-    this->buffer.flush(this->allocator, buffer_offset, size);
+    this->buffer.flush(this->device, buffer_offset, size);
 
     this->pending_images.push_back(PendingImageUpload{
         .texture = *upload.texture,
@@ -124,8 +126,8 @@ void Uploader::record_buffer_upload(
             .setBuffer(upload.buffer)
             .setSrcStageMask(vk::PipelineStageFlagBits2::eTransfer)
             .setSrcAccessMask(vk::AccessFlagBits2::eTransferWrite)
-            .setDstStageMask(upload.dst_stage_mask)
-            .setDstAccessMask(upload.dst_access_mask)
+            .setDstStageMask(upload.usage_stage)
+            .setDstAccessMask(upload.usage_access)
             .setOffset(upload.offset)
             .setSize(upload.size)
     );

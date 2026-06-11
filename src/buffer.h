@@ -2,17 +2,17 @@
 #include <vk_mem_alloc.hpp>
 #include <vulkan/vulkan.hpp>
 #include <vk_mem_alloc.hpp>
-#include "vk_error.h"
+#include "device.h"
 
 struct Buffer {
     vk::Buffer buffer;
     vma::Allocation allocation;
-    vk::DeviceSize size;
-    vk::DeviceAddress address;
-    void *mapped_data;
+    vk::DeviceSize size = 0;
+    vk::DeviceAddress address = 0;
+    void *mapped_data = nullptr;
 
-    void destroy(vma::Allocator allocator) {
-        allocator.destroyBuffer(this->buffer, this->allocation);
+    void destroy(const DeviceHandle& device) {
+        device->allocator.destroyBuffer(this->buffer, this->allocation);
         this->buffer = vk::Buffer();
         this->allocation = vma::Allocation();
         this->size = 0;
@@ -28,15 +28,15 @@ struct Buffer {
         return reinterpret_cast<uint8_t*>(this->mapped_data) + offset_bytes;
     }
 
-    void flush(
-        vma::Allocator allocator,
+    bool flush(
+        const DeviceHandle& device,
         vk::DeviceSize offset = 0,
         std::optional<vk::DeviceSize> size = std::nullopt
-    ) {
-        vk_expect(allocator.flushAllocation(
+    ) const {
+        return device->allocator.flushAllocation(
             this->allocation, 
             offset, size.value_or(this->size)
-        ), "Failed to flush buffer allocation");
+        ) == vk::Result::eSuccess;
     }
 
     operator vk::Buffer() const {
@@ -49,29 +49,25 @@ struct Buffer {
 };
 
 Buffer create_buffer(
-    vk::Device device,
-    vma::Allocator allocator,
+    const DeviceHandle& device,
     vk::BufferCreateInfo buffer_info,
     const vma::AllocationCreateInfo& alloc_info
 );
 
 Buffer create_gpu_buffer(
-    vk::Device device,
-    vma::Allocator allocator,
+    const DeviceHandle& device,
     vk::BufferUsageFlags usage, 
     vk::DeviceSize size
 );
 
 Buffer create_mapped_buffer(
-    vk::Device device,
-    vma::Allocator allocator,
+    const DeviceHandle& device,
     vk::BufferUsageFlags usage, 
     vk::DeviceSize size
 );
 
 Buffer create_staging_buffer(
-    vk::Device device,
-    vma::Allocator allocator,
+    const DeviceHandle& device,
     vk::BufferUsageFlags usage, 
     vk::DeviceSize size
 );

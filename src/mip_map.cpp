@@ -49,10 +49,10 @@ static void record_image_mipmap_gen(vk::CommandBuffer command_buffer, const Text
                 )
         );
 
-        auto src_width = int32_t(std::max(texture.extent.width >> (mip_level - 1), 1u));
-        auto src_height = int32_t(std::max(texture.extent.height >> (mip_level - 1), 1u));
-        auto dst_width = int32_t(std::max(texture.extent.width >> mip_level, 1u));
-        auto dst_height = int32_t(std::max(texture.extent.height >> mip_level, 1u));
+        auto src_width = static_cast<int32_t>(std::max(texture.extent.width >> (mip_level - 1), 1u));
+        auto src_height = static_cast<int32_t>(std::max(texture.extent.height >> (mip_level - 1), 1u));
+        auto dst_width = static_cast<int32_t>(std::max(texture.extent.width >> mip_level, 1u));
+        auto dst_height = static_cast<int32_t>(std::max(texture.extent.height >> mip_level, 1u));
 
         std::array<vk::Offset3D, 2> src_offsets = {
             vk::Offset3D(0, 0, 0), 

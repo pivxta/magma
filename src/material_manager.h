@@ -2,6 +2,7 @@
 #include "resource.h"
 #include "slot_map.h"
 #include "material.h"
+#include "device.h"
 #include "buffer.h"
 #include <vector>
 #include <vulkan/vulkan.hpp>
@@ -13,12 +14,16 @@ class MaterialManager {
 public:
     MaterialManager() = default;
     MaterialManager(
-        vk::Device device, 
-        vma::Allocator allocator, 
+        DeviceHandle device,
         uint32_t frames_in_flight,
         uint32_t max_materials
     );
-    void destroy();
+
+    MaterialManager(const MaterialManager&) = delete;
+    MaterialManager& operator=(const MaterialManager&) = delete;
+    MaterialManager(MaterialManager&&) noexcept = default;
+    MaterialManager& operator=(MaterialManager&&) noexcept = default;
+    ~MaterialManager();
 
     void flag_dirty_materials(const TextureManager& texture_manager);
     void update_dirty(const TextureManager& texture_manager, uint32_t frame_index);
@@ -37,9 +42,7 @@ public:
 private:
     void set_dirty(SlotKey<Material> key);
 
-    vk::Device device;
-    vma::Allocator allocator;
-
+    DeviceHandle device;
     std::vector<Buffer> buffers;
     std::vector<std::vector<SlotKey<Material>>> dirty;
     SlotMap<Material> materials;

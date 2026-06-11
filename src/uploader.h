@@ -7,8 +7,8 @@
 struct BufferUpload {
     const Buffer* buffer;
     vk::DeviceSize offset = 0;
-    vk::AccessFlags2 dst_access_mask = {};
-    vk::PipelineStageFlags2 dst_stage_mask = {};
+    vk::AccessFlags2 usage_access = {};
+    vk::PipelineStageFlags2 usage_stage = {};
 
     const void* memory = nullptr;
     size_t size = 0;
@@ -23,13 +23,13 @@ struct BufferUpload {
         return *this;
     }
 
-    BufferUpload& set_dst_access_mask(vk::AccessFlags2 dst_access_mask) {
-        this->dst_access_mask = dst_access_mask;
+    BufferUpload& set_usage_access(vk::AccessFlags2 dst_access_mask) {
+        this->usage_access = dst_access_mask;
         return *this;
     }
 
-    BufferUpload& set_dst_stage_mask(vk::PipelineStageFlags2 dst_stage_mask) {
-        this->dst_stage_mask = dst_stage_mask;
+    BufferUpload& set_usage_stage(vk::PipelineStageFlags2 dst_stage_mask) {
+        this->usage_stage = dst_stage_mask;
         return *this;
     }
 
@@ -95,12 +95,16 @@ public:
 
     Uploader() = default;
     Uploader(
-        vk::Device device,
-        vma::Allocator allocator, 
+        DeviceHandle device,
         uint32_t frames_in_flight,
         vk::DeviceSize capacity_per_fif
     );
-    void destroy();
+
+    Uploader(const Uploader&) = delete;
+    Uploader& operator=(const Uploader&) = delete;
+    Uploader(Uploader&&) noexcept = default;
+    Uploader& operator=(Uploader&&) noexcept = default;
+    ~Uploader();
 
     bool upload_buffer(BufferUpload upload);
     bool upload_image(ImageUpload upload);
@@ -123,8 +127,8 @@ private:
         Buffer buffer;
         vk::DeviceSize size;
         vk::DeviceSize offset;
-        vk::AccessFlags2 dst_access_mask;
-        vk::PipelineStageFlags2 dst_stage_mask;
+        vk::AccessFlags2 usage_access;
+        vk::PipelineStageFlags2 usage_stage;
         ArenaAllocation<vk::DeviceSize> staging_range;
 
         uint32_t frame_index;
@@ -136,12 +140,12 @@ private:
         const PendingBufferUpload& upload
     );
 
-    vma::Allocator allocator;
+    DeviceHandle device;
 
     uint32_t frame_index = 0;
 
     Buffer buffer;
-    vk::DeviceSize stride;
+    vk::DeviceSize stride = 0;
 
     Arena<vk::DeviceSize> arena;
     std::vector<PendingImageUpload> pending_images;

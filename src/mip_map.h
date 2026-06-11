@@ -6,7 +6,6 @@ public:
     MipmapGenerator() = default;
 
     void generate(Texture texture);
-
     void flush(vk::CommandBuffer command_buffer);
 
 private:

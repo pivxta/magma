@@ -23,13 +23,16 @@ class MeshManager {
 public:
     MeshManager() = default;
     MeshManager(
-        vk::Device device, 
-        vma::Allocator allocator,
+        DeviceHandle device,
         uint32_t frames_in_flight,
         vk::DeviceSize vertex_heap_capacity,
         vk::DeviceSize index_heap_capacity
     );
-    void destroy();
+
+    MeshManager(const MeshManager&) = delete;
+    MeshManager& operator=(const MeshManager&) = delete;
+    MeshManager(MeshManager&&) noexcept = default;
+    MeshManager& operator=(MeshManager&&) noexcept = default;
 
     MeshData get(MeshId id) const;
     MeshId reserve();

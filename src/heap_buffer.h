@@ -51,7 +51,7 @@ public:
     }
 
     bool flush_mapped(
-        vma::Allocator allocator,
+        const DeviceHandle& device,
         vk::DeviceSize first = 0,
         std::optional<vk::DeviceSize> count = std::nullopt
     ) {
@@ -64,8 +64,8 @@ public:
         vk::DeviceSize flush_offset = first * sizeof(T);
         vk::DeviceSize flush_size = flush_count * sizeof(T);
 
-        return allocator.flushAllocation(
-            this->parent_buffer->allocation, 
+        return device->allocator.flushAllocation(
+            this->parent_buffer->allocation,
             this->local_range.offset + flush_offset,
             flush_size
         ) == vk::Result::eSuccess;
@@ -86,14 +86,18 @@ class HeapBuffer {
 public:
     HeapBuffer() = default;
     HeapBuffer(
-        vk::Device device, 
-        vma::Allocator allocator,
+        DeviceHandle device,
         uint32_t frames_in_flight,
         vk::DeviceSize min_alignment,
         const vk::BufferCreateInfo& buffer_info,
         const vma::AllocationCreateInfo& alloc_info
     );
-    void destroy();
+
+    HeapBuffer(const HeapBuffer&) = delete;
+    HeapBuffer& operator=(const HeapBuffer&) = delete;
+    HeapBuffer(HeapBuffer&&) noexcept = default;
+    HeapBuffer& operator=(HeapBuffer&&) noexcept = default;
+    ~HeapBuffer();
 
     template<typename T>
     requires std::is_trivially_copyable_v<T>
@@ -144,11 +148,11 @@ private:
         FreeListAllocation<vk::DeviceSize> range;
     };
 
-    vma::Allocator allocator;
+    DeviceHandle device;
 
     Buffer buffer_;
-    vk::DeviceSize min_alignment;
-    uint32_t frames_in_flight;
+    vk::DeviceSize min_alignment = 0;
+    uint32_t frames_in_flight = 0;
     uint64_t frame_counter = 0;
 
     FreeList<vk::DeviceSize> free_list;

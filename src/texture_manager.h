@@ -26,14 +26,19 @@ public:
     TextureManager() = default;
 
     TextureManager(
-        vk::Device device, 
-        vma::Allocator allocator,
+        DeviceHandle device,
         Uploader& uploader,
         uint32_t frames_in_flight,
         uint32_t max_textures
     );
+
+    TextureManager(const TextureManager&) = delete;
+    TextureManager& operator=(const TextureManager&) = delete;
+    TextureManager(TextureManager&&) noexcept = default;
+    TextureManager& operator=(TextureManager&&) noexcept = default;
+    ~TextureManager();
+
     void destroy_pending();
-    void destroy();
     
     TextureIndices get(TextureId id, TextureFallback fallback = TextureFallback::ColorError) const;
     TextureIndices get_fallback(TextureFallback fallback = TextureFallback::ColorError) const;
@@ -78,9 +83,9 @@ public:
     
 private:
     void create_fallbacks(Uploader& uploader);
-    void create_samplers(vk::Device device);
-    void bind_samplers(vk::Device device, vk::DescriptorSet set, std::span<Sampler> types);
-    void destroy_samplers(vk::Device device);
+    void create_samplers();
+    void bind_samplers(vk::DescriptorSet set, std::span<Sampler> types);
+    void destroy_samplers();
 
     std::optional<SlotKey<Texture>> create_texture(Uploader& uploader, const Image& image);
     void destroy_texture(SlotKey<Texture> key);
@@ -104,8 +109,7 @@ private:
     using Samplers = std::array<vk::Sampler, static_cast<size_t>(Sampler::Count)>;
     using Fallbacks = std::array<SlotKey<Texture>, static_cast<size_t>(TextureFallback::Count)>;
 
-    vk::Device device;
-    vma::Allocator allocator;
+    DeviceHandle device;
 
     vk::DescriptorPool desc_pool;
     vk::DescriptorSetLayout desc_set_layout;

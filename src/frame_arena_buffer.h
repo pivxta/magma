@@ -50,7 +50,7 @@ public:
     }
 
     bool flush(
-        vma::Allocator allocator,
+        const DeviceHandle& device,
         vk::DeviceSize first = 0,
         std::optional<vk::DeviceSize> count = std::nullopt
     ) {
@@ -63,11 +63,11 @@ public:
         vk::DeviceSize flush_offset = first * sizeof(T);
         vk::DeviceSize flush_size = flush_count * sizeof(T);
 
-        return allocator.flushAllocation(
-            this->parent_buffer->allocation, 
+        return this->parent_buffer->flush(
+            device,
             this->base_offset + flush_offset,
             flush_size
-        ) == vk::Result::eSuccess;
+        );
     }
 
 private:
@@ -88,13 +88,18 @@ public:
 
     FrameArenaBuffer() = default;
     FrameArenaBuffer(
-        vk::Device device, 
-        vma::Allocator allocator, 
+        DeviceHandle device,
         vk::BufferUsageFlags usage,
         uint32_t frames_in_flight,
         vk::DeviceSize capacity_per_fif
     );
-    void destroy();
+
+    FrameArenaBuffer(const FrameArenaBuffer&) = delete;
+    FrameArenaBuffer& operator=(const FrameArenaBuffer&) = delete;
+    FrameArenaBuffer(FrameArenaBuffer&&) noexcept = default;
+    FrameArenaBuffer& operator=(FrameArenaBuffer&&) noexcept = default;
+
+    ~FrameArenaBuffer();
 
     template<typename T>
     requires std::is_trivially_copyable_v<T>
@@ -107,7 +112,7 @@ public:
             return std::nullopt;
         }
         buffer->write(value);
-        buffer->flush(this->allocator);
+        buffer->flush(this->device);
         return buffer;
     }
 
@@ -126,7 +131,7 @@ public:
             return std::nullopt;
         }
         buffer->write(values);
-        buffer->flush(this->allocator);
+        buffer->flush(this->device);
         return buffer;
     }
 
@@ -169,7 +174,7 @@ public:
     void begin_frame(uint32_t next_frame_index);
 
 private:
-    vma::Allocator allocator;
+    DeviceHandle device;
 
     uint32_t frame_index = 0;
 

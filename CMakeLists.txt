@@ -64,32 +64,52 @@ find_program(SLANGC_EXECUTABLE
 )
 
 function(add_shaders TARGET)
-    set(SHADER_TARGETS "")
-    set(OUTPUT_DIR "${CMAKE_BINARY_DIR}/bin/shaders")
+    set(one_value_args OUTPUT_DIR)
+    set(multi_value_args SHADERS MODULES INCLUDE_DIRS)
+    cmake_parse_arguments(ARG "" "${one_value_args}" "${multi_value_args}" ${ARGN})
 
-    foreach(SHADER ${ARGN})
-        get_filename_component(SHADER_NAME ${SHADER} NAME_WE)
-        set(OUTPUT_SPV "${OUTPUT_DIR}/${SHADER_NAME}.spv")
+    if(NOT ARG_OUTPUT_DIR)
+        set(ARG_OUTPUT_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/shaders")
+    endif()
+    if(NOT ARG_INCLUDE_DIRS)
+        set(ARG_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+    endif()
 
-        add_custom_command(
-            OUTPUT ${OUTPUT_SPV}
-            COMMAND ${CMAKE_COMMAND} -E make_directory ${OUTPUT_DIR}
-            COMMAND ${SLANGC_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/${SHADER}
-                -target spirv -profile spirv_1_5
-                -emit-spirv-directly -fvk-use-entrypoint-name
-                -o ${OUTPUT_SPV}
-            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${SHADER}
-            COMMENT "Compiling Slang shader ${SHADER}"
-            VERBATIM
-        )
-
-        set(SHADER_TARGET "${TARGET}_${SHADER_NAME}_shader")
-        add_custom_target(${SHADER_TARGET} DEPENDS ${OUTPUT_SPV})
-        list(APPEND SHADER_TARGETS ${SHADER_TARGET})
+    set(include_flags "")
+    foreach(dir ${ARG_INCLUDE_DIRS})
+        list(APPEND include_flags -I "${dir}")
     endforeach()
 
-    add_dependencies(${TARGET} ${SHADER_TARGETS})
+    set(module_deps "")
+    foreach(mod ${ARG_MODULES})
+        list(APPEND module_deps "${CMAKE_CURRENT_SOURCE_DIR}/${mod}")
+    endforeach()
+
+    set(spv_outputs "")
+    foreach(shader ${ARG_SHADERS})
+        get_filename_component(name ${shader} NAME_WE)
+        set(out_spv "${ARG_OUTPUT_DIR}/${name}.spv")
+
+        add_custom_command(
+            OUTPUT "${out_spv}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${ARG_OUTPUT_DIR}"
+            COMMAND ${SLANGC_EXECUTABLE}
+                "${CMAKE_CURRENT_SOURCE_DIR}/${shader}"
+                ${include_flags}
+                -target spirv -profile spirv_1_5
+                -emit-spirv-directly -fvk-use-entrypoint-name
+                -o "${out_spv}"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${shader}" ${module_deps}
+            COMMENT "Compiling Slang shader ${shader}"
+            VERBATIM
+        )
+        list(APPEND spv_outputs "${out_spv}")
+    endforeach()
+
+    add_custom_target(${TARGET}_shaders DEPENDS ${spv_outputs})
+    add_dependencies(${TARGET} ${TARGET}_shaders)
+
+    target_compile_definitions(${TARGET} PRIVATE SHADER_DIR="${ARG_OUTPUT_DIR}")
 endfunction()
 
 find_package(Vulkan MODULE REQUIRED)
@@ -149,12 +169,35 @@ add_executable(
     src/heap_buffer.cpp
     src/logging.h
     src/light.h
-    src/meshobject.h
+    src/mesh_object.h
     src/scene.h
-    src/meshpreset.h
-    src/meshpreset.cpp
+    src/mesh_preset.h
+    src/mesh_preset.cpp
+    src/texture_quality.h
+    src/render_target_manager.h
+    src/post_processing.h
+    src/device.h
+    src/device.cpp
 )
-add_shaders(${PROJECT_NAME} shaders/shader.slang)
+add_shaders(
+    ${PROJECT_NAME}
+    OUTPUT_DIR
+        ${CMAKE_SOURCE_DIR}/shaders/compiled
+    SHADERS
+        shaders/pbr_forward.slang
+        shaders/tonemap.slang
+    MODULES
+        shaders/consts.slang
+        shaders/surface.slang
+        shaders/agx.slang
+        shaders/reinhard.slang
+        shaders/brdf.slang
+        shaders/cooktorrance.slang
+        shaders/light.slang
+        shaders/textures.slang
+        shaders/parallax.slang
+        shaders/pbr_material.slang
+)
 add_compile_definitions(VULKAN_HPP_NO_EXCEPTIONS GLFW_INCLUDE_VULKAN)
 
 if (ENABLE_CLANG_TIDY)
