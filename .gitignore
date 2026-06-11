@@ -1,5 +1,6 @@
 /build
 /build/*
+/shaders/compiled
 /.vscode
 /.cache
 /.claude
