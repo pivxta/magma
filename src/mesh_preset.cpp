@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <vector>
+#include <array>
 
 // Picks a tangent perpendicular to `n`. The bitangent is taken as cross(n, t),
 // so tangent.w is always +1 with this basis. Chosen so a default up-facing
@@ -75,7 +76,11 @@ void add_quad(
 Mesh flatten(const Mesh& mesh) {
     MeshBuilder builder;
     for (size_t i = 0; i + 3 <= mesh.indices.size(); i += 3) {
-        std::array tri = {mesh.indices[i], mesh.indices[i + 1], mesh.indices[i + 2]};
+        std::array tri = {
+            mesh.indices[i], 
+            mesh.indices[i + 1], 
+            mesh.indices[i + 2]
+        };
 
         glm::vec3 p0 = mesh.positions[tri[0]];
         glm::vec3 face = glm::cross(mesh.positions[tri[1]] - p0, mesh.positions[tri[2]] - p0);
@@ -90,8 +95,9 @@ Mesh flatten(const Mesh& mesh) {
             uint32_t index = tri[k];
             glm::vec4 src = mesh.tangents[index];
             glm::vec3 tangent = glm::vec3(src) - normal * glm::dot(normal, glm::vec3(src));
-            tangent = glm::dot(tangent, tangent) > 1e-12f ? glm::normalize(tangent)
-                                                          : tangent_for_normal(normal);
+            tangent = glm::dot(tangent, tangent) > 1e-12f ? 
+                glm::normalize(tangent): 
+                tangent_for_normal(normal);
             out[k] = builder.vertex(
                 mesh.positions[index],
                 normal,
@@ -190,15 +196,14 @@ Mesh Cylinder::to_mesh() {
         builder.vertex(rim + glm::vec3(0.0f, -half_height, 0.0f), normal, tangent, {u, 1.0f});
     }
     for (uint32_t slice = 0; slice < this->slices; slice++) {
-        uint32_t a = (slice + 0) * 2 + 0; // ring0[slice]
-        uint32_t b = (slice + 1) * 2 + 0; // ring0[slice + 1]
-        uint32_t c = (slice + 0) * 2 + 1; // ring1[slice]
-        uint32_t d = (slice + 1) * 2 + 1; // ring1[slice + 1]
+        uint32_t a = (slice + 0) * 2 + 0;
+        uint32_t b = (slice + 1) * 2 + 0;
+        uint32_t c = (slice + 0) * 2 + 1;
+        uint32_t d = (slice + 1) * 2 + 1;
         builder.triangle(a, b, c);
         builder.triangle(c, b, d);
     }
 
-    // Caps: top faces +Y, bottom faces -Y. Triangle fans around a center vertex.
     struct Cap { float y; glm::vec3 normal; bool flip; };
     std::array caps = {
         Cap{.y = half_height, .normal = {0.0f, 1.0f, 0.0f}, .flip = true},
@@ -225,9 +230,9 @@ Mesh Cylinder::to_mesh() {
             uint32_t a = first + slice;
             uint32_t b = first + (slice + 1) % this->slices;
             if (cap.flip) {
-                builder.triangle(center, b, a); // CCW about +Y
+                builder.triangle(center, b, a);
             } else {
-                builder.triangle(center, a, b); // CCW about -Y
+                builder.triangle(center, a, b);
             }
         }
     }

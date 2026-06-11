@@ -221,7 +221,7 @@ endif()
 if (MSVC) 
     target_compile_options(
         ${PROJECT_NAME} PRIVATE 
-        /W4 $<$<BOOL:${ENABLE_WERROR}>:/WX> /wd4458 /wd4324
+        /W4 $<$<BOOL:${ENABLE_WERROR}>:/WX> /wd4458 /wd4324 /wd4456
     )
 else ()
     target_compile_options(

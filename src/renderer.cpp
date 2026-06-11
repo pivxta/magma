@@ -908,7 +908,7 @@ private:
                     .setFirstIndex(mesh.index_offset)
                     .setIndexCount(mesh.index_count)
                     .setFirstInstance(0)
-                    .setInstanceCount(i - start)
+                    .setInstanceCount(static_cast<uint32_t>(i) - start)
                     .setVertexOffset(0)
             );
         }
