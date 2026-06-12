@@ -22,8 +22,9 @@ struct VertexData {
 class MeshManager {
 public:
     MeshManager() = default;
-    MeshManager(
-        DeviceHandle device,
+
+    explicit MeshManager(
+        const DeviceHandle& device,
         uint32_t frames_in_flight,
         vk::DeviceSize vertex_heap_capacity,
         vk::DeviceSize index_heap_capacity

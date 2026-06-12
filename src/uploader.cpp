@@ -10,10 +10,18 @@ Uploader::Uploader(
     arena(capacity_per_fif)
 {
     this->stride = capacity_per_fif;
-    this->buffer = create_staging_buffer(
+    this->buffer = Buffer(
         this->device,
-        vk::BufferUsageFlagBits::eTransferSrc,
-        capacity_per_fif * frames_in_flight
+        vk::BufferCreateInfo()
+            .setSharingMode(vk::SharingMode::eExclusive)
+            .setUsage(vk::BufferUsageFlagBits::eTransferSrc)
+            .setSize(capacity_per_fif * frames_in_flight),
+        vma::AllocationCreateInfo()
+            .setUsage(vma::MemoryUsage::eAuto)
+            .setFlags(
+                vma::AllocationCreateFlagBits::eMapped
+                | vma::AllocationCreateFlagBits::eHostAccessSequentialWrite
+            )
     );
 }
 
@@ -27,7 +35,7 @@ Uploader::~Uploader() {
 bool Uploader::upload_buffer(BufferUpload upload) {
     assert(upload.buffer != nullptr);
 
-    if (upload.size + upload.offset > upload.buffer->size) {
+    if (upload.size + upload.offset > upload.buffer->size()) {
         spdlog::error("Buffer not big enough for upload");
         return false;
     }
@@ -38,7 +46,7 @@ bool Uploader::upload_buffer(BufferUpload upload) {
     }
 
     Buffer buffer = *upload.buffer;
-    if (buffer.mapped_data != nullptr) {
+    if (buffer.mapped() != nullptr) {
         memcpy(buffer.mapped(upload.offset), upload.memory, upload.size);
         buffer.flush(this->device, upload.offset, upload.size);
         return true;
@@ -138,7 +146,7 @@ void Uploader::record_image_upload(
     const PendingImageUpload& upload
 ) {
     auto subresource_range = vk::ImageSubresourceRange()
-        .setAspectMask(get_default_aspect_flags(upload.texture.format))
+        .setAspectMask(get_default_aspect_flags(upload.texture.format()))
         .setBaseMipLevel(0)
         .setLevelCount(1)
         .setBaseArrayLayer(0)
@@ -168,7 +176,7 @@ void Uploader::record_image_upload(
                 .setImageExtent(upload.extent)
                 .setImageSubresource(
                     vk::ImageSubresourceLayers()
-                        .setAspectMask(get_default_aspect_flags(upload.texture.format))
+                        .setAspectMask(get_default_aspect_flags(upload.texture.format()))
                         .setBaseArrayLayer(0)
                         .setLayerCount(1)
                         .setMipLevel(0)

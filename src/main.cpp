@@ -196,7 +196,7 @@ private:
             paving_material.set_ao_roughness_metallic_map(this->renderer.add_texture(image.value()));
         }
         if (auto image = Image::load("images/pavingstonesnormal.jpg", linear_load); image != std::nullopt) {
-            paving_material.set_normal_map(this->renderer.add_texture(image.value()));
+           paving_material.set_normal_map(this->renderer.add_texture(image.value()));
         }
         if (auto image = Image::load("images/pavingstonesdisplacement.jpg", linear_load); image != std::nullopt) {
             paving_material.set_displacement_map(this->renderer.add_texture(image.value()));

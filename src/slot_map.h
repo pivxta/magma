@@ -16,7 +16,7 @@ class SlotMap {
 public:
     SlotMap() = default;
 
-    SlotMap(uint32_t size_limit) {
+    explicit SlotMap(uint32_t size_limit) {
         this->size_limit = size_limit;
     }
  

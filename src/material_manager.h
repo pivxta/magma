@@ -13,7 +13,8 @@ class TextureManager;
 class MaterialManager {
 public:
     MaterialManager() = default;
-    MaterialManager(
+
+    explicit MaterialManager(
         DeviceHandle device,
         uint32_t frames_in_flight,
         uint32_t max_materials
@@ -36,7 +37,7 @@ public:
     uint32_t get_index(MaterialId id) const;
 
     vk::DeviceAddress buffer_address(uint32_t frame_index) const {
-        return this->buffers[frame_index].address;
+        return this->buffers[frame_index].address();
     }
 
 private:

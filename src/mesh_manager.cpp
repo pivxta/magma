@@ -4,12 +4,12 @@ static constexpr vk::DeviceSize VERTEX_ALIGNMENT = 16;
 static constexpr vk::DeviceSize INDEX_ALIGNMENT = sizeof(uint32_t);
 
 MeshManager::MeshManager(
-    DeviceHandle device,
+    const DeviceHandle& device,
     uint32_t frames_in_flight,
     vk::DeviceSize vertex_heap_capacity,
     vk::DeviceSize index_heap_capacity
-):
-    vertex_heap(
+) {
+    this->vertex_heap = HeapBuffer(
         device,
         frames_in_flight,
         VERTEX_ALIGNMENT,
@@ -23,9 +23,9 @@ MeshManager::MeshManager(
             ),
         vma::AllocationCreateInfo()
             .setUsage(vma::MemoryUsage::eGpuOnly)
-    ),
-    index_heap(
-        std::move(device),
+    );
+    this->index_heap = HeapBuffer(
+        device,
         frames_in_flight,
         INDEX_ALIGNMENT,
         vk::BufferCreateInfo()
@@ -37,8 +37,8 @@ MeshManager::MeshManager(
             ),
         vma::AllocationCreateInfo()
             .setUsage(vma::MemoryUsage::eGpuOnly)
-    )
-{}
+    );
+}
 
 SlotKey<MeshManager::MeshSubBuffers> MeshManager::get_slot_key(MeshId id) {
     return {

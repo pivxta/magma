@@ -3,29 +3,58 @@
 #include <vk_mem_alloc.hpp>
 #include "device.h"
 
-struct Texture {
-    vk::Image image;
-    vma::Allocation allocation;
-    vk::ImageView view;
+class Texture {
+public:
+    Texture() = default;
+    explicit Texture(const DeviceHandle& device, const vk::ImageCreateInfo& info);
 
-    uint32_t array_layers = 0;
-    uint32_t mip_levels = 0;
-    vk::SampleCountFlags samples = {};
-    vk::Extent3D extent;
-    vk::Format format = vk::Format::eUndefined;
+    void destroy(const DeviceHandle& device) {
+        device->logical.destroyImageView(this->view_);
+        device->allocator.destroyImage(this->image, this->allocation);
+    }
+
+    vk::ImageView default_view() const {
+        return this->view_;
+    }
+    
+    vk::Extent3D extent() const {
+        return this->extent_;
+    }
+
+    vk::Format format() const {
+        return this->format_;
+    }
+
+    vk::SampleCountFlags samples() const {
+        return this->samples_;
+    }
+
+    uint32_t array_layers() const {
+        return this->array_layers_;
+    }
+
+    uint32_t mip_levels() const {
+        return this->mip_levels_;
+    }
 
     bool is_null() const {
         return this->image == vk::Image();
     }
 
-    void destroy(const DeviceHandle& device) {
-        device->logical.destroyImageView(this->view);
-        device->allocator.destroyImage(this->image, this->allocation);
-    }
-
     operator vk::Image() const {
         return this->image;
     }
+
+private:
+    vk::Image image;
+    vma::Allocation allocation;
+    vk::ImageView view_;
+
+    uint32_t array_layers_ = 0;
+    uint32_t mip_levels_ = 0;
+    vk::SampleCountFlags samples_ = {};
+    vk::Extent3D extent_;
+    vk::Format format_ = vk::Format::eUndefined;
 };
 
 static inline vk::ImageAspectFlags get_default_aspect_flags(vk::Format format) {
@@ -47,5 +76,3 @@ static inline vk::ImageAspectFlags get_default_aspect_flags(vk::Format format) {
             return vk::ImageAspectFlagBits::eColor;
     }
 }
-
-Texture create_texture(const DeviceHandle& device, const vk::ImageCreateInfo& info);

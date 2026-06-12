@@ -9,7 +9,7 @@ static void record_image_barrier(vk::CommandBuffer command_buffer, vk::ImageMemo
 }
 
 static void record_image_mipmap_gen(vk::CommandBuffer command_buffer, const Texture& texture) {
-    for (uint32_t mip_level = 1; mip_level < texture.mip_levels; mip_level++) {
+    for (uint32_t mip_level = 1; mip_level < texture.mip_levels(); mip_level++) {
         record_image_barrier(
             command_buffer,
             vk::ImageMemoryBarrier2()
@@ -49,10 +49,14 @@ static void record_image_mipmap_gen(vk::CommandBuffer command_buffer, const Text
                 )
         );
 
-        auto src_width = static_cast<int32_t>(std::max(texture.extent.width >> (mip_level - 1), 1u));
-        auto src_height = static_cast<int32_t>(std::max(texture.extent.height >> (mip_level - 1), 1u));
-        auto dst_width = static_cast<int32_t>(std::max(texture.extent.width >> mip_level, 1u));
-        auto dst_height = static_cast<int32_t>(std::max(texture.extent.height >> mip_level, 1u));
+        auto src_width = 
+            static_cast<int32_t>(std::max(texture.extent().width >> (mip_level - 1), 1u));
+        auto src_height = 
+            static_cast<int32_t>(std::max(texture.extent().height >> (mip_level - 1), 1u));
+        auto dst_width = 
+            static_cast<int32_t>(std::max(texture.extent().width >> mip_level, 1u));
+        auto dst_height = 
+            static_cast<int32_t>(std::max(texture.extent().height >> mip_level, 1u));
 
         std::array<vk::Offset3D, 2> src_offsets = {
             vk::Offset3D(0, 0, 0), 
@@ -123,7 +127,7 @@ static void record_image_mipmap_gen(vk::CommandBuffer command_buffer, const Text
             .setSubresourceRange(
                 vk::ImageSubresourceRange()
                     .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                    .setBaseMipLevel(texture.mip_levels - 1)
+                    .setBaseMipLevel(texture.mip_levels() - 1)
                     .setLevelCount(1)
                     .setBaseArrayLayer(0)
                     .setLayerCount(1)

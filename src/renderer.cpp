@@ -518,7 +518,7 @@ private:
         for (uint32_t i = 0; i < this->tonemap_sets.size(); i++) {
             infos.push_back(
                 vk::DescriptorImageInfo()
-                    .setImageView(this->hdr_textures[i].view)
+                    .setImageView(this->hdr_textures[i].default_view())
                     .setImageLayout(vk::ImageLayout::eShaderReadOnlyOptimal)
             );
             writes.push_back(
@@ -724,6 +724,7 @@ private:
         );
         vk_expect(result2, "Failed to create pipeline layout");
 
+        vk::Format color_format = this->hdr_textures[0].format();
         auto [result3, pipeline] = this->device->logical.createGraphicsPipeline(
             vk::PipelineCache(),
             vk::StructureChain{
@@ -740,7 +741,7 @@ private:
                     .setPDynamicState(&dyn_state),
 
                 vk::PipelineRenderingCreateInfo()
-                    .setColorAttachmentFormats(this->hdr_textures[0].format)
+                    .setColorAttachmentFormats(color_format)
                     .setDepthAttachmentFormat(vk::Format::eD32Sfloat)
             }
             .get()
@@ -757,7 +758,8 @@ private:
             this->hdr_textures.resize(FRAMES_IN_FLIGHT);
         }
 
-        Texture texture = this->create_image(
+        Texture texture(
+            this->device,
             vk::ImageCreateInfo()
                 .setImageType(vk::ImageType::e2D)
                 .setExtent(vk::Extent3D(this->swapchain.extent(), 1))
@@ -783,7 +785,8 @@ private:
             this->depth_textures.resize(FRAMES_IN_FLIGHT);
         }
 
-        Texture texture = this->create_image(
+        Texture texture(
+            this->device,
             vk::ImageCreateInfo()
                 .setImageType(vk::ImageType::e2D)
                 .setExtent(vk::Extent3D(this->swapchain.extent(), 1))
@@ -816,10 +819,6 @@ private:
                 this->hdr_textures[i].destroy(this->device);
             }
         }
-    }
-
-    Texture create_image(const vk::ImageCreateInfo& info) {
-        return ::create_texture(this->device, info);
     }
 
     ViewData get_view_data(const Camera& camera) {
@@ -932,6 +931,8 @@ private:
         FrameSubBuffer instances = this->frame_arena.add(scene_data.instances).value();
         FrameSubBuffer draws = this->frame_arena.add(scene_data.draws).value();
         FrameSubBuffer draw_commands = this->frame_arena.add(scene_data.draw_commands).value();
+
+        this->frame_arena.flush();
         
         return {
             .clear_color = scene_data.clear_color,
@@ -1065,7 +1066,7 @@ private:
         );
 
         auto color_attachment = vk::RenderingAttachmentInfo()
-            .setImageView(this->hdr_textures[this->frame_index].view)
+            .setImageView(this->hdr_textures[this->frame_index].default_view())
             .setImageLayout(vk::ImageLayout::eColorAttachmentOptimal)
             .setClearValue(vk::ClearColorValue(
                 data.clear_color.r, 
@@ -1077,7 +1078,7 @@ private:
             .setStoreOp(vk::AttachmentStoreOp::eStore);
 
         auto depth_attachment = vk::RenderingAttachmentInfo()
-            .setImageView(this->depth_textures[this->frame_index].view)
+            .setImageView(this->depth_textures[this->frame_index].default_view())
             .setImageLayout(vk::ImageLayout::eDepthAttachmentOptimal)
             .setClearValue(vk::ClearDepthStencilValue(0.0f))
             .setLoadOp(vk::AttachmentLoadOp::eClear)

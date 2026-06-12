@@ -69,7 +69,7 @@ struct ImageUpload {
 
     ImageUpload& set_texture(const Texture& texture) {
         this->texture = &texture;
-        this->extent = texture.extent;
+        this->extent = texture.extent();
         return *this;
     }
 
@@ -94,7 +94,7 @@ public:
     static constexpr vk::DeviceSize DEFAULT_ALIGNMENT = 256;
 
     Uploader() = default;
-    Uploader(
+    explicit Uploader(
         DeviceHandle device,
         uint32_t frames_in_flight,
         vk::DeviceSize capacity_per_fif

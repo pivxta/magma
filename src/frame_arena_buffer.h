@@ -49,27 +49,6 @@ public:
         memcpy(this->mapped() + first, memory.data(), memory.size_bytes());
     }
 
-    bool flush(
-        const DeviceHandle& device,
-        vk::DeviceSize first = 0,
-        std::optional<vk::DeviceSize> count = std::nullopt
-    ) {
-        assert(this->parent_buffer != nullptr);
-        assert(first <= this->elem_count);
-
-        vk::DeviceSize flush_count = count.value_or(this->elem_count - first);
-        assert(flush_count <= this->elem_count - first);
-
-        vk::DeviceSize flush_offset = first * sizeof(T);
-        vk::DeviceSize flush_size = flush_count * sizeof(T);
-
-        return this->parent_buffer->flush(
-            device,
-            this->base_offset + flush_offset,
-            flush_size
-        );
-    }
-
 private:
     friend class FrameArenaBuffer;
 
@@ -87,7 +66,7 @@ public:
     static constexpr vk::DeviceSize DEFAULT_ALIGNMENT = 16;
 
     FrameArenaBuffer() = default;
-    FrameArenaBuffer(
+    explicit FrameArenaBuffer(
         DeviceHandle device,
         vk::BufferUsageFlags usage,
         uint32_t frames_in_flight,
@@ -112,7 +91,6 @@ public:
             return std::nullopt;
         }
         buffer->write(value);
-        buffer->flush(this->device);
         return buffer;
     }
 
@@ -131,7 +109,6 @@ public:
             return std::nullopt;
         }
         buffer->write(values);
-        buffer->flush(this->device);
         return buffer;
     }
 
@@ -163,14 +140,15 @@ public:
         vk::DeviceSize offset = this->stride * this->frame_index + alloc->offset;
         FrameSubBuffer<T> allocation;
         allocation.parent_buffer = &this->buffer;
-        allocation.base_address = this->buffer.address + offset;
         allocation.base_offset = offset;
         allocation.elem_count = count;
+        allocation.base_address = this->buffer.address() + offset;
         allocation.mapped_data = this->buffer.mapped(offset);
         allocation.local_range = *alloc;
         return allocation;
     }
 
+    void flush();
     void begin_frame(uint32_t next_frame_index);
 
 private:

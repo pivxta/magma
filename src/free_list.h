@@ -27,7 +27,7 @@ public:
         this->policy = FreeListPolicy::FirstFit;
     }
 
-    FreeList(T capacity, FreeListPolicy policy) {
+    explicit FreeList(T capacity, FreeListPolicy policy) {
         this->capacity = capacity;
         this->policy = policy;
         ranges.push_back(FreeRange{0, capacity});

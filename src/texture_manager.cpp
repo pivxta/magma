@@ -240,7 +240,7 @@ static Texture create_texture_from_image(
     uint32_t max_mip_levels = static_cast<uint32_t>(std::log2(std::max(src.width, src.height))) + 1;
     uint32_t mip_levels = src.mip_levels.value_or(max_mip_levels);
 
-    return create_texture(
+    return Texture(
         device,
         vk::ImageCreateInfo()
             .setImageType(vk::ImageType::e2D)
@@ -275,7 +275,7 @@ std::optional<SlotKey<Texture>> TextureManager::create_texture(
         this->mipmap_generator.generate(texture);
 
         auto info = vk::DescriptorImageInfo()
-            .setImageView(texture.view)
+            .setImageView(texture.default_view())
             .setImageLayout(vk::ImageLayout::eShaderReadOnlyOptimal);
         this->device->logical.updateDescriptorSets(
             vk::WriteDescriptorSet()

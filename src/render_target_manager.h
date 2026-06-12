@@ -40,9 +40,11 @@ struct RenderTargetSubresourceState {
     vk::PipelineStageFlags2 stage;
 };
 
-struct RenderTargetUse {
-    // Aspect mask is set automatically if not already set
-    vk::ImageSubresourceRange subresource_range;
+struct RenderTargetUsage {
+    uint32_t base_mip_level = 0;
+    uint32_t mip_level_count = 1;
+    uint32_t base_array_layer = 0;
+    uint32_t array_layer_count = 1;
     RenderTargetSubresourceState new_state;
     bool discard = false;
 };
@@ -64,13 +66,16 @@ public:
     const Texture* get(RenderTargetId id);
     void free(RenderTargetId id);
 
-    // Aspect mask is set automatically if not already set
-    RenderTargetSubresourceState state(RenderTargetId id, vk::ImageSubresource subresource);
-    void use(RenderTargetId id, vk::CommandBuffer command_buffer, RenderTargetUse use);
+    RenderTargetSubresourceState state(
+        RenderTargetId id, 
+        uint32_t array_layer = 0, 
+        uint32_t mip_level = 0
+    );
+    void use(RenderTargetId id, vk::CommandBuffer command_buffer, RenderTargetUsage uses);
     void use(
         RenderTargetId id,
         vk::CommandBuffer command_buffer,
-        std::span<RenderTargetUse> uses
+        std::span<RenderTargetUsage> uses
     );
     
     void resize_swapchain(vk::Extent2D swapchain_extent);

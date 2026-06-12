@@ -1,7 +1,7 @@
 #include "buffer.h"
 #include "vk_error.h"
 
-Buffer create_buffer(
+Buffer::Buffer(
     const DeviceHandle& device,
     vk::BufferCreateInfo buffer_info,
     const vma::AllocationCreateInfo& alloc_info
@@ -18,68 +18,9 @@ Buffer create_buffer(
             .getBufferAddress(vk::BufferDeviceAddressInfo().setBuffer(buffer));
     }
 
-    return {
-        .buffer = buffer,
-        .allocation = allocation,
-        .size = buffer_info.size,
-        .address = address,
-        .mapped_data = info.pMappedData
-    };
-}
-
-Buffer create_gpu_buffer(
-    const DeviceHandle& device,
-    vk::BufferUsageFlags usage, 
-    vk::DeviceSize size
-) {
-    return create_buffer(
-        device,
-        vk::BufferCreateInfo()
-            .setSharingMode(vk::SharingMode::eExclusive)
-            .setSize(size)
-            .setUsage(usage | vk::BufferUsageFlagBits::eShaderDeviceAddress),
-        vma::AllocationCreateInfo()
-            .setUsage(vma::MemoryUsage::eGpuOnly)
-    );
-}
-
-Buffer create_mapped_buffer(
-    const DeviceHandle& device,
-    vk::BufferUsageFlags usage, 
-    vk::DeviceSize size
-) {
-    return create_buffer(
-        device,
-        vk::BufferCreateInfo()
-            .setSharingMode(vk::SharingMode::eExclusive)
-            .setSize(size)
-            .setUsage(usage | vk::BufferUsageFlagBits::eShaderDeviceAddress),
-        vma::AllocationCreateInfo()
-            .setFlags(
-                vma::AllocationCreateFlagBits::eHostAccessSequentialWrite
-                    | vma::AllocationCreateFlagBits::eMapped
-            )
-            .setUsage(vma::MemoryUsage::eAuto)
-    );
-}
-
-
-Buffer create_staging_buffer(
-    const DeviceHandle& device,
-    vk::BufferUsageFlags usage, 
-    vk::DeviceSize size
-) {
-    return create_buffer(
-        device,
-        vk::BufferCreateInfo()
-            .setSharingMode(vk::SharingMode::eExclusive)
-            .setSize(size)
-            .setUsage(usage),
-        vma::AllocationCreateInfo()
-            .setFlags(
-                vma::AllocationCreateFlagBits::eHostAccessSequentialWrite
-                    | vma::AllocationCreateFlagBits::eMapped
-            )
-            .setUsage(vma::MemoryUsage::eAuto)
-    );
+    this->buffer = buffer;
+    this->allocation = allocation;
+    this->size_ = buffer_info.size;
+    this->address_ = address;
+    this->mapped_data = info.pMappedData;
 }

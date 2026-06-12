@@ -68,12 +68,22 @@ static std::vector<Buffer> create_buffers(
     std::vector<Buffer> buffers;
     buffers.reserve(frames_in_flight);
     for (uint32_t i = 0; i < frames_in_flight; i++) {
-        buffers.push_back(create_mapped_buffer(
+        buffers.emplace_back(
             device,
-            vk::BufferUsageFlagBits::eStorageBuffer
-                | vk::BufferUsageFlagBits::eShaderDeviceAddress,
-            max_materials * sizeof(MaterialData)
-        ));
+            vk::BufferCreateInfo()
+                .setSharingMode(vk::SharingMode::eExclusive)
+                .setSize(max_materials * sizeof(MaterialData))
+                .setUsage(
+                    vk::BufferUsageFlagBits::eStorageBuffer
+                    | vk::BufferUsageFlagBits::eShaderDeviceAddress
+                ),
+            vma::AllocationCreateInfo()
+                .setUsage(vma::MemoryUsage::eAuto)
+                .setFlags(
+                    vma::AllocationCreateFlagBits::eMapped
+                    | vma::AllocationCreateFlagBits::eHostAccessRandom
+                )
+        );
     }
     return buffers;
 }
@@ -135,9 +145,9 @@ void MaterialManager::update_dirty(const TextureManager& texture_manager, uint32
         return;
     }
 
-    vk::DeviceSize write_start = this->buffers[frame_index].size;
+    vk::DeviceSize write_start = this->buffers[frame_index].size();
     vk::DeviceSize write_end = 0;
-    auto mapped_data = reinterpret_cast<MaterialData*>(this->buffers[frame_index].mapped_data);
+    auto mapped_data = reinterpret_cast<MaterialData*>(this->buffers[frame_index].mapped());
     for (auto key: this->dirty[frame_index]) {
         auto entry_offset = static_cast<vk::DeviceSize>(key.index) * sizeof(MaterialData);
         auto entry_size = static_cast<vk::DeviceSize>(sizeof(MaterialData));

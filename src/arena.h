@@ -15,8 +15,12 @@ public:
     static_assert(std::is_unsigned_v<T>, "Arena requires an unsigned integer type");
 
     Arena() = default;
-    Arena(T capacity) {
+    explicit Arena(T capacity) {
         this->capacity = capacity;
+    }
+
+    T used() const {
+        return this->offset;
     }
 
     std::optional<ArenaAllocation<T>> allocate(T size, T alignment) {

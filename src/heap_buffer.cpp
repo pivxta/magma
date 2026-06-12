@@ -12,11 +12,7 @@ HeapBuffer::HeapBuffer(
 {
     this->frames_in_flight = frames_in_flight;
     this->min_alignment = min_alignment;
-    this->buffer_ = create_buffer(
-        this->device,
-        buffer_info,
-        alloc_info
-    );
+    this->buffer_ = Buffer(this->device, buffer_info, alloc_info);
 }
 
 HeapBuffer::~HeapBuffer() {

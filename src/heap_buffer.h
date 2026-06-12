@@ -64,11 +64,11 @@ public:
         vk::DeviceSize flush_offset = first * sizeof(T);
         vk::DeviceSize flush_size = flush_count * sizeof(T);
 
-        return device->allocator.flushAllocation(
-            this->parent_buffer->allocation,
+        return this->parent_buffer->flush(
+            device,
             this->local_range.offset + flush_offset,
             flush_size
-        ) == vk::Result::eSuccess;
+        );
     }
 
 private:
@@ -85,7 +85,8 @@ private:
 class HeapBuffer {
 public:
     HeapBuffer() = default;
-    HeapBuffer(
+
+    explicit HeapBuffer(
         DeviceHandle device,
         uint32_t frames_in_flight,
         vk::DeviceSize min_alignment,
@@ -115,9 +116,9 @@ public:
 
         HeapSubBuffer<T> allocation;
         allocation.parent_buffer = &this->buffer_;
-        allocation.base_address = this->buffer_.address + alloc->offset;
-        allocation.elem_count = count;
+        allocation.base_address = this->buffer_.address() + alloc->offset;
         allocation.mapped_data = this->buffer_.mapped(alloc->offset);
+        allocation.elem_count = count;
         allocation.local_range = *alloc;
         return allocation;
     }

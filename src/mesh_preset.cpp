@@ -5,10 +5,6 @@
 #include <vector>
 #include <array>
 
-// Picks a tangent perpendicular to `n`. The bitangent is taken as cross(n, t),
-// so tangent.w is always +1 with this basis. Chosen so a default up-facing
-// plane (normal -Y) yields tangent +X / bitangent +Z, matching the renderer's
-// CCW-front / +Y-down conventions.
 static glm::vec3 tangent_for_normal(glm::vec3 n) {
     auto ref = std::abs(n.z) < 0.999f ? 
         glm::vec3(0.0f, 0.0f, 1.0f):
@@ -39,8 +35,6 @@ struct MeshBuilder {
         this->indices.push_back(c);
     }
 
-    // Corners laid out as v0=(-u,-v) v1=(+u,-v) v2=(-u,+v) v3=(+u,+v); the
-    // (0,1,2)+(1,3,2) split winds CCW around (u x v).
     void quad(uint32_t v0, uint32_t v1, uint32_t v2, uint32_t v3) {
         this->triangle(v0, v1, v2);
         this->triangle(v1, v3, v2);
