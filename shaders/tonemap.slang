@@ -1,5 +1,6 @@
 import agx;
 import reinhard;
+import render_targets;
 
 struct BlitVertex {
     float4 clip_position: SV_Position;
@@ -22,6 +23,7 @@ enum Tonemap {
 };
 
 struct TonemapConstants {
+    RenderTargetIndices input;
     Tonemap tonemap;
     float exposure;
     AgxLook agx_look;
@@ -30,14 +32,9 @@ struct TonemapConstants {
 [[vk::push_constant]]
 TonemapConstants constants;
 
-[[vk::binding(0, 0)]]
-Texture2D source;
-[[vk::binding(1, 0)]]
-SamplerState source_sampler;
-
 [shader("fragment")]
 float4 fragment_main(BlitVertex input) : SV_Target {
-    let input_color = constants.exposure * source.Sample(source_sampler, input.tex_coords).rgb;
+    let input_color = constants.exposure * constants.input.sample(input.tex_coords).rgb;
     var output_color = input_color;
     if (constants.tonemap == Tonemap::Reinhard) {
         output_color = reinhard(input_color);

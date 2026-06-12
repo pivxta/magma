@@ -9,6 +9,11 @@ class Buffer {
 public:
     Buffer() = default;
 
+    Buffer(const Buffer&) noexcept = default;
+    Buffer& operator=(const Buffer&) noexcept = default;
+    Buffer(Buffer&&) noexcept = default;
+    Buffer& operator=(Buffer&&) noexcept = default;
+
     explicit Buffer(
         const DeviceHandle& device,
         vk::BufferCreateInfo buffer_info,
@@ -16,7 +21,9 @@ public:
     );
 
     void destroy(const DeviceHandle& device) {
-        device->allocator.destroyBuffer(this->buffer, this->allocation);
+        if (this->buffer != vk::Buffer{}) {
+            device->allocator.destroyBuffer(this->buffer, this->allocation);
+        }
         this->buffer = vk::Buffer();
         this->allocation = vma::Allocation();
         this->size_ = 0;

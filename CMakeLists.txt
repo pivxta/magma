@@ -173,11 +173,14 @@ add_executable(
     src/scene.h
     src/mesh_preset.h
     src/mesh_preset.cpp
-    src/texture_quality.h
+    src/texture_filtering.h
     src/render_target_manager.h
+    src/render_target_manager.cpp
     src/post_processing.h
     src/device.h
     src/device.cpp
+    src/bindless_set.h
+    src/bindless_set.cpp
 )
 add_shaders(
     ${PROJECT_NAME}
@@ -195,6 +198,7 @@ add_shaders(
         shaders/cooktorrance.slang
         shaders/light.slang
         shaders/textures.slang
+        shaders/render_targets.slang
         shaders/parallax.slang
         shaders/pbr_material.slang
 )

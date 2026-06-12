@@ -12,6 +12,7 @@
 #include "texture_manager.h"
 #include "material_manager.h"
 #include "mesh_manager.h"
+#include "render_target_manager.h"
 #include "device.h"
 #include "scene.h"
 #include "time.h"
@@ -28,6 +29,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <vulkan/vulkan.hpp>
 
+static constexpr uint32_t MAX_RENDER_TARGETS = 256;
 static constexpr uint32_t MAX_TEXTURES = 4096;
 static constexpr uint32_t MAX_MATERIALS = 2048;
 static constexpr auto FRAME_ARENA_CAPACITY_PER_FIF = static_cast<vk::DeviceSize>(16 * 1024 * 1024);
@@ -53,12 +55,18 @@ struct AgxConstants {
 };
 
 struct TonemapConstants {
+    RenderTargetIndices input;
     TonemapType type;
     float exposure;
 
     AgxConstants agx;
 
-    TonemapConstants(const Tonemap& tonemap, float film_exposure) {
+    TonemapConstants(
+        RenderTargetIndices input,
+        const Tonemap& tonemap, 
+        float film_exposure
+    ) {
+        this->input = input;
         std::visit([&](const auto& value) {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, DisabledTonemap>) {
@@ -182,76 +190,6 @@ static inline std::vector<uint32_t> read_spirv_file(const std::filesystem::path&
     }
 };
 
-static vk::DescriptorPool create_tonemap_descriptor_pool(vk::Device device, uint32_t set_count) {
-    std::array pool_sizes = {
-        vk::DescriptorPoolSize()
-            .setType(vk::DescriptorType::eSampledImage)
-            .setDescriptorCount(set_count),
-        vk::DescriptorPoolSize()
-            .setType(vk::DescriptorType::eSampler)
-            .setDescriptorCount(set_count),
-    };
-    auto [result, pool] = device.createDescriptorPool(
-        vk::DescriptorPoolCreateInfo()
-            .setMaxSets(set_count)
-            .setPoolSizes(pool_sizes)
-    );
-    vk_expect(result, "Failed to create tonemap descriptor pool");
-    return pool;
-}
-
-static vk::DescriptorSetLayout create_tonemap_set_layout(vk::Device device) {
-    std::array bindings = {
-        vk::DescriptorSetLayoutBinding()
-            .setBinding(0)
-            .setDescriptorType(vk::DescriptorType::eSampledImage)
-            .setDescriptorCount(1)
-            .setStageFlags(vk::ShaderStageFlagBits::eFragment),
-        vk::DescriptorSetLayoutBinding()
-            .setBinding(1)
-            .setDescriptorType(vk::DescriptorType::eSampler)
-            .setDescriptorCount(1)
-            .setStageFlags(vk::ShaderStageFlagBits::eFragment),
-    };
-    auto [result, layout] = device.createDescriptorSetLayout(
-        vk::DescriptorSetLayoutCreateInfo().setBindings(bindings)
-    );
-    vk_expect(result, "Failed to create tonemap descriptor set layout");
-    return layout;
-}
-
-static std::vector<vk::DescriptorSet> allocate_tonemap_sets(
-    vk::Device device,
-    vk::DescriptorPool pool,
-    vk::DescriptorSetLayout layout,
-    uint32_t count
-) {
-    std::vector<vk::DescriptorSetLayout> layouts(count, layout);
-    auto [result, sets] = device.allocateDescriptorSets(
-        vk::DescriptorSetAllocateInfo()
-            .setDescriptorPool(pool)
-            .setSetLayouts(layouts)
-    );
-    vk_expect(result, "Failed to allocate tonemap descriptor sets");
-    return sets;
-}
-
-static vk::Sampler create_tonemap_sampler(vk::Device device) {
-    auto [result, sampler] = device.createSampler(
-        vk::SamplerCreateInfo()
-            .setMagFilter(vk::Filter::eLinear)
-            .setMinFilter(vk::Filter::eLinear)
-            .setMipmapMode(vk::SamplerMipmapMode::eNearest)
-            .setAddressModeU(vk::SamplerAddressMode::eClampToEdge)
-            .setAddressModeV(vk::SamplerAddressMode::eClampToEdge)
-            .setAddressModeW(vk::SamplerAddressMode::eClampToEdge)
-            .setMinLod(0.0f)
-            .setMaxLod(0.0f)
-    );
-    vk_expect(result, "Failed to create tonemap sampler");
-    return sampler;
-}
-
 struct Renderer::Inner {
     static constexpr uint32_t FRAMES_IN_FLIGHT = 2;
 
@@ -274,6 +212,7 @@ struct Renderer::Inner {
             .set_format(vk::Format::eB8G8R8A8Srgb)
             .set_colorspace(vk::ColorSpaceKHR::eSrgbNonlinear)
             .set_present_mode(vk::PresentModeKHR::eMailbox);
+
         this->configure_render_targets();
         this->create_sync_primitives();
         this->create_command_pool();
@@ -281,6 +220,11 @@ struct Renderer::Inner {
             this->device,
             FRAMES_IN_FLIGHT,
             UPLOADER_CAPACITY_PER_FIF
+        );
+        this->target_manager = RenderTargetManager(
+            this->device,
+            FRAMES_IN_FLIGHT,
+            MAX_RENDER_TARGETS
         );
         this->texture_manager = TextureManager(
             this->device,
@@ -307,8 +251,8 @@ struct Renderer::Inner {
             FRAME_ARENA_CAPACITY_PER_FIF
         );
         this->allocate_command_buffers();
+        this->create_render_targets();
         this->create_pipeline();
-        this->setup_tonemap();
         this->create_tonemap_pipeline();
     }
 
@@ -321,8 +265,6 @@ struct Renderer::Inner {
         this->device->logical.freeCommandBuffers(this->command_pool, this->command_buffers);
         this->device->logical.destroyCommandPool(this->command_pool);
         this->destroy_sync_primitives();
-        this->destroy_target_textures();
-        this->destroy_tonemap();
     }
 
     void resize() {
@@ -380,7 +322,7 @@ struct Renderer::Inner {
             "Fence wait failed"
         );
 
-        auto [result1, image] = this->swapchain.acquire_image(
+        auto [result1, swapchain_texture] = this->swapchain.acquire_texture(
             this->image_available[this->frame_index]
         );
 
@@ -393,18 +335,20 @@ struct Renderer::Inner {
 
         vk_expect(this->device->logical.resetFences(fence), "Fence reset failed");
         this->mesh_manager.free_pending();
-        this->texture_manager.destroy_pending();
+        this->texture_manager.update_pending();
+        this->target_manager.destroy_pending();
         this->material_manager.flag_dirty_materials(this->texture_manager);
         this->material_manager.update_dirty(this->texture_manager, this->frame_index);
         this->texture_manager.clear_updated();
+        this->target_manager.bind(this->swapchain_target, *swapchain_texture.texture);
 
         vk::CommandBuffer command_buffer = this->begin_frame_commands();
         this->uploader.flush(command_buffer);
         this->texture_manager.flush_mip_maps(command_buffer);
-        this->record_frame_commands(command_buffer, image, scene);
-        this->submit_frame_commands(command_buffer, image);
+        this->record_frame_commands(command_buffer, swapchain_texture, scene);
+        this->submit_frame_commands(command_buffer, swapchain_texture);
 
-        vk::Result result2 = this->swapchain.present(image);
+        vk::Result result2 = this->swapchain.present(swapchain_texture);
         if (result2 == vk::Result::eSuboptimalKHR 
             || result2 == vk::Result::eErrorOutOfDateKHR 
             || this->should_reconfigure_swapchain) 
@@ -419,13 +363,32 @@ struct Renderer::Inner {
         this->frame_arena.begin_frame(this->frame_index);
         this->texture_manager.begin_frame(this->frame_counter);
         this->mesh_manager.begin_frame(this->frame_counter);
+        this->target_manager.begin_frame(this->frame_counter);
     }
 
 private:
+    void create_render_targets() {
+        this->swapchain.configure(this->device, this->swapchain_info);
+        this->target_manager.resize_swapchain(this->swapchain.extent());
+        this->swapchain_target = this->target_manager.reserve().value();
+        this->depth_target = this->target_manager.add(
+            RenderTargetInfo()
+                .set_buffering(RenderTargetBuffering::PerFif)
+                .set_size_policy(SwapchainAdjustedSizePolicy())
+                .set_usage(vk::ImageUsageFlagBits::eSampled)
+                .set_format(vk::Format::eD32Sfloat)
+        ).value();
+        this->hdr_target = this->target_manager.add(
+            RenderTargetInfo()
+                .set_buffering(RenderTargetBuffering::PerFif)
+                .set_size_policy(SwapchainAdjustedSizePolicy())
+                .set_usage(vk::ImageUsageFlagBits::eSampled)
+                .set_format(vk::Format::eR16G16B16A16Sfloat)
+        ).value();
+    }
 
     void reconfigure_render_targets() {
         this->configure_render_targets();
-        this->write_tonemap_descriptors();
         this->should_reconfigure_swapchain = false;
     }
 
@@ -435,12 +398,7 @@ private:
             this->swapchain.configure(this->device, this->swapchain_info),
             "Failed to configure swapchain"
         );
-        for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
-            this->create_hdr_image(i);
-        }
-        for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
-            this->create_depth_image(i);
-        }
+        this->target_manager.resize_swapchain(this->swapchain.extent());
     }
 
     void create_sync_primitives() {
@@ -489,65 +447,6 @@ private:
         );
         vk_expect(result, "Failed to allocate command buffers");
         this->command_buffers = command_buffers;
-    }
-
-    void setup_tonemap() {
-        this->tonemap_sampler = create_tonemap_sampler(this->device->logical);
-        this->tonemap_set_layout = create_tonemap_set_layout(this->device->logical);
-        this->tonemap_descriptor_pool =
-            create_tonemap_descriptor_pool(this->device->logical, FRAMES_IN_FLIGHT);
-        this->tonemap_sets = allocate_tonemap_sets(
-            this->device->logical,
-            this->tonemap_descriptor_pool,
-            this->tonemap_set_layout,
-            FRAMES_IN_FLIGHT
-        );
-        this->write_tonemap_descriptors();
-    }
-
-    void write_tonemap_descriptors() {
-        if (this->tonemap_sets.empty()) {
-            return;
-        }
-
-        std::vector<vk::DescriptorImageInfo> infos;
-        infos.reserve(this->tonemap_sets.size() * 2);
-        std::vector<vk::WriteDescriptorSet> writes;
-        writes.reserve(this->tonemap_sets.size() * 2);
-
-        for (uint32_t i = 0; i < this->tonemap_sets.size(); i++) {
-            infos.push_back(
-                vk::DescriptorImageInfo()
-                    .setImageView(this->hdr_textures[i].default_view())
-                    .setImageLayout(vk::ImageLayout::eShaderReadOnlyOptimal)
-            );
-            writes.push_back(
-                vk::WriteDescriptorSet()
-                    .setDstSet(this->tonemap_sets[i])
-                    .setDstBinding(0)
-                    .setDstArrayElement(0)
-                    .setDescriptorType(vk::DescriptorType::eSampledImage)
-                    .setImageInfo(infos.back())
-            );
-
-            infos.push_back(vk::DescriptorImageInfo().setSampler(this->tonemap_sampler));
-            writes.push_back(
-                vk::WriteDescriptorSet()
-                    .setDstSet(this->tonemap_sets[i])
-                    .setDstBinding(1)
-                    .setDstArrayElement(0)
-                    .setDescriptorType(vk::DescriptorType::eSampler)
-                    .setImageInfo(infos.back())
-            );
-        }
-
-        this->device->logical.updateDescriptorSets(writes, {});
-    }
-
-    void destroy_tonemap() {
-        this->device->logical.destroyDescriptorPool(this->tonemap_descriptor_pool);
-        this->device->logical.destroyDescriptorSetLayout(this->tonemap_set_layout);
-        this->device->logical.destroySampler(this->tonemap_sampler);
     }
 
     void create_tonemap_pipeline() {
@@ -607,7 +506,10 @@ private:
         };
         auto dyn_state = vk::PipelineDynamicStateCreateInfo().setDynamicStates(dynamic_states);
 
-        std::array set_layouts = {this->tonemap_set_layout};
+        std::array set_layouts = {
+            this->texture_manager.descriptor_set_layout(),
+            this->target_manager.descriptor_set_layout()
+        };
         std::array push_constant_ranges = {
             vk::PushConstantRange()
                 .setOffset(0)
@@ -724,7 +626,7 @@ private:
         );
         vk_expect(result2, "Failed to create pipeline layout");
 
-        vk::Format color_format = this->hdr_textures[0].format();
+        vk::Format color_format = this->target_manager.get(this->hdr_target)->format();
         auto [result3, pipeline] = this->device->logical.createGraphicsPipeline(
             vk::PipelineCache(),
             vk::StructureChain{
@@ -751,74 +653,6 @@ private:
 
         this->pipeline = pipeline;
         this->pipeline_layout = pipeline_layout;
-    }
-
-    void create_hdr_image(uint32_t frame_index) {
-        if (this->hdr_textures.size() != FRAMES_IN_FLIGHT) {
-            this->hdr_textures.resize(FRAMES_IN_FLIGHT);
-        }
-
-        Texture texture(
-            this->device,
-            vk::ImageCreateInfo()
-                .setImageType(vk::ImageType::e2D)
-                .setExtent(vk::Extent3D(this->swapchain.extent(), 1))
-                .setFormat(vk::Format::eR16G16B16A16Sfloat)
-                .setUsage(vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled)
-                .setMipLevels(1)
-                .setArrayLayers(1)
-                .setSamples(vk::SampleCountFlagBits::e1)
-                .setInitialLayout(vk::ImageLayout::eUndefined)
-                .setSharingMode(vk::SharingMode::eExclusive)
-                .setTiling(vk::ImageTiling::eOptimal)
-        );
-
-        if (!this->hdr_textures[frame_index].is_null()) {
-            this->hdr_textures[frame_index].destroy(this->device);
-        }
-
-        this->hdr_textures[frame_index] = texture;
-    }
-
-    void create_depth_image(uint32_t frame_index) {
-        if (this->depth_textures.size() != FRAMES_IN_FLIGHT) {
-            this->depth_textures.resize(FRAMES_IN_FLIGHT);
-        }
-
-        Texture texture(
-            this->device,
-            vk::ImageCreateInfo()
-                .setImageType(vk::ImageType::e2D)
-                .setExtent(vk::Extent3D(this->swapchain.extent(), 1))
-                .setFormat(vk::Format::eD32Sfloat)
-                .setUsage(vk::ImageUsageFlagBits::eDepthStencilAttachment)
-                .setMipLevels(1)
-                .setArrayLayers(1)
-                .setSamples(vk::SampleCountFlagBits::e1)
-                .setInitialLayout(vk::ImageLayout::eUndefined)
-                .setSharingMode(vk::SharingMode::eExclusive)
-                .setTiling(vk::ImageTiling::eOptimal)
-        );
-
-        if (!this->depth_textures[frame_index].is_null()) {
-            this->depth_textures[frame_index].destroy(this->device);
-        }
-
-        this->depth_textures[frame_index] = texture;
-    }
-
-    void destroy_target_textures() {
-        for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
-            if (!this->depth_textures[i].is_null()) {
-                this->depth_textures[i].destroy(this->device);
-            }
-        }
-
-        for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
-            if (!this->hdr_textures[i].is_null()) {
-                this->hdr_textures[i].destroy(this->device);
-            }
-        }
     }
 
     ViewData get_view_data(const Camera& camera) {
@@ -948,107 +782,45 @@ private:
 
     void record_frame_commands(
         vk::CommandBuffer command_buffer, 
-        const SwapchainImage& image,
+        const SwapchainTexture& swapchain_texture,
         const Scene& scene
     ) {
         FrameData data = this->write_frame_data(scene);
 
-        auto subresource_range = vk::ImageSubresourceRange()
-            .setAspectMask(vk::ImageAspectFlagBits::eColor)
-            .setBaseMipLevel(0)
-            .setLevelCount(1)
-            .setBaseArrayLayer(0)
-            .setLayerCount(1);
-
-        this->record_image_barrier(
-            command_buffer,
-            vk::ImageMemoryBarrier2()
-                .setImage(this->hdr_textures[this->frame_index])
-                .setSrcStageMask(vk::PipelineStageFlagBits2::eNone)
-                .setSrcAccessMask(vk::AccessFlagBits2::eNone)
-                .setDstStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput)
-                .setDstAccessMask(vk::AccessFlagBits2::eColorAttachmentWrite)
-                .setOldLayout(vk::ImageLayout::eUndefined)
-                .setNewLayout(vk::ImageLayout::eColorAttachmentOptimal)
-                .setSubresourceRange(
-                    vk::ImageSubresourceRange()
-                        .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                        .setBaseMipLevel(0)
-                        .setLevelCount(1)
-                        .setBaseArrayLayer(0)
-                        .setLayerCount(1)
-                )
-        );
-        this->record_image_barrier(
-            command_buffer,
-            vk::ImageMemoryBarrier2()
-                .setImage(this->depth_textures[this->frame_index])
-                .setSrcStageMask(vk::PipelineStageFlagBits2::eNone)
-                .setSrcAccessMask(vk::AccessFlagBits2::eNone)
-                .setDstStageMask(vk::PipelineStageFlagBits2::eEarlyFragmentTests)
-                .setDstAccessMask(
-                    vk::AccessFlagBits2::eDepthStencilAttachmentRead
-                        | vk::AccessFlagBits2::eDepthStencilAttachmentWrite
-                )
-                .setOldLayout(vk::ImageLayout::eUndefined)
-                .setNewLayout(vk::ImageLayout::eDepthAttachmentOptimal)
-                .setSubresourceRange(
-                    vk::ImageSubresourceRange()
-                        .setAspectMask(vk::ImageAspectFlagBits::eDepth)
-                        .setBaseMipLevel(0)
-                        .setLevelCount(1)
-                        .setBaseArrayLayer(0)
-                        .setLayerCount(1)
-                )
-        );
         this->record_draw_commands(command_buffer, data);
-        this->record_image_barrier(
-            command_buffer,
-            vk::ImageMemoryBarrier2()
-                .setImage(image.image)
-                .setSrcStageMask(vk::PipelineStageFlagBits2::eFragmentShader)
-                .setSrcAccessMask(vk::AccessFlagBits2::eNone)
-                .setDstStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput)
-                .setDstAccessMask(vk::AccessFlagBits2::eColorAttachmentWrite)
-                .setOldLayout(vk::ImageLayout::eUndefined)
-                .setNewLayout(vk::ImageLayout::eColorAttachmentOptimal)
-                .setSubresourceRange(subresource_range)
-        );
-        this->record_image_barrier(
-            command_buffer,
-            vk::ImageMemoryBarrier2()
-                .setImage(this->hdr_textures[this->frame_index])
-                .setSrcStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput)
-                .setSrcAccessMask(vk::AccessFlagBits2::eColorAttachmentWrite)
-                .setDstStageMask(vk::PipelineStageFlagBits2::eFragmentShader)
-                .setDstAccessMask(vk::AccessFlagBits2::eShaderSampledRead)
-                .setOldLayout(vk::ImageLayout::eColorAttachmentOptimal)
-                .setNewLayout(vk::ImageLayout::eShaderReadOnlyOptimal)
-                .setSubresourceRange(
-                    vk::ImageSubresourceRange()
-                        .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                        .setBaseMipLevel(0)
-                        .setLevelCount(1)
-                        .setBaseArrayLayer(0)
-                        .setLayerCount(1)
-                )
-        );
-        this->record_tonemap_commands(command_buffer, image, scene);
-        this->record_image_barrier(
-            command_buffer,
-            vk::ImageMemoryBarrier2()
-                .setImage(image.image)
-                .setSrcStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput)
-                .setSrcAccessMask(vk::AccessFlagBits2::eColorAttachmentWrite)
-                .setDstStageMask(vk::PipelineStageFlagBits2::eNone)
-                .setDstAccessMask(vk::AccessFlagBits2::eNone)
-                .setOldLayout(vk::ImageLayout::eColorAttachmentOptimal)
-                .setNewLayout(vk::ImageLayout::ePresentSrcKHR)
-                .setSubresourceRange(subresource_range)
-        );
+        this->record_tonemap_commands(command_buffer, swapchain_texture, scene);
     }
 
     void record_draw_commands(vk::CommandBuffer command_buffer, const FrameData& data) {
+        this->target_manager.use(
+            command_buffer, 
+            this->hdr_target, 
+            RenderTargetUsage()
+                .set_discard(true)
+                .set_new_state(
+                    RenderTargetSubresourceState()
+                        .set_access(vk::AccessFlagBits2::eColorAttachmentWrite)
+                        .set_stage(vk::PipelineStageFlagBits2::eColorAttachmentOutput)
+                        .set_layout(vk::ImageLayout::eColorAttachmentOptimal)
+                )
+        );
+
+        this->target_manager.use(
+            command_buffer, 
+            this->depth_target, 
+            RenderTargetUsage()
+                .set_discard(true)
+                .set_new_state(
+                    RenderTargetSubresourceState()
+                        .set_stage(vk::PipelineStageFlagBits2::eEarlyFragmentTests)
+                        .set_layout(vk::ImageLayout::eDepthAttachmentOptimal)
+                        .set_access(
+                            vk::AccessFlagBits2::eDepthStencilAttachmentRead
+                            | vk::AccessFlagBits2::eDepthStencilAttachmentWrite
+                        )
+                )
+        );
+
         DrawConstants draw_constants = {
             .view_data = data.view_data.address(),
             .light_data = data.light_data.address(),
@@ -1066,7 +838,7 @@ private:
         );
 
         auto color_attachment = vk::RenderingAttachmentInfo()
-            .setImageView(this->hdr_textures[this->frame_index].default_view())
+            .setImageView(this->target_manager.get(this->hdr_target)->default_view())
             .setImageLayout(vk::ImageLayout::eColorAttachmentOptimal)
             .setClearValue(vk::ClearColorValue(
                 data.clear_color.r, 
@@ -1078,7 +850,7 @@ private:
             .setStoreOp(vk::AttachmentStoreOp::eStore);
 
         auto depth_attachment = vk::RenderingAttachmentInfo()
-            .setImageView(this->depth_textures[this->frame_index].default_view())
+            .setImageView(this->target_manager.get(this->depth_target)->default_view())
             .setImageLayout(vk::ImageLayout::eDepthAttachmentOptimal)
             .setClearValue(vk::ClearDepthStencilValue(0.0f))
             .setLoadOp(vk::AttachmentLoadOp::eClear)
@@ -1113,16 +885,43 @@ private:
 
     void record_tonemap_commands(
         vk::CommandBuffer command_buffer, 
-        const SwapchainImage& image,
+        const SwapchainTexture& swapchain_texture,
         const Scene& scene
     ) {
+        this->target_manager.use(
+            command_buffer, 
+            this->hdr_target, 
+            RenderTargetUsage()
+                .set_new_state(
+                    RenderTargetSubresourceState()
+                        .set_stage(vk::PipelineStageFlagBits2::eFragmentShader)
+                        .set_access(vk::AccessFlagBits2::eShaderRead)
+                        .set_layout(vk::ImageLayout::eShaderReadOnlyOptimal)
+                )
+        );
+        this->target_manager.use(
+            command_buffer,
+            this->swapchain_target,
+            RenderTargetUsage()
+                .set_discard(true)
+                .set_new_state(
+                    RenderTargetSubresourceState()
+                        .set_stage(vk::PipelineStageFlagBits2::eColorAttachmentOutput)
+                        .set_access(vk::AccessFlagBits2::eColorAttachmentWrite)
+                        .set_layout(vk::ImageLayout::eColorAttachmentOptimal)
+                )
+        );
         command_buffer.pushConstants<TonemapConstants>(
             this->tonemap_pipeline_layout,
             vk::ShaderStageFlagBits::eFragment,
-            0, {TonemapConstants(scene.post.tonemap, scene.camera.film.exposure)}
+            0, {TonemapConstants(
+                this->target_manager.get_indices(this->hdr_target).value(), 
+                scene.post.tonemap, 
+                scene.camera.film.exposure
+            )}
         );
         auto color_attachment = vk::RenderingAttachmentInfo()
-            .setImageView(image.view)
+            .setImageView(swapchain_texture.texture->default_view())
             .setImageLayout(vk::ImageLayout::eColorAttachmentOptimal)
             .setLoadOp(vk::AttachmentLoadOp::eDontCare)
             .setStoreOp(vk::AttachmentStoreOp::eStore);
@@ -1139,10 +938,24 @@ private:
         command_buffer.bindDescriptorSets(
             vk::PipelineBindPoint::eGraphics,
             this->tonemap_pipeline_layout, 0,
-            {this->tonemap_sets[this->frame_index]}, {}
+            {
+                this->texture_manager.descriptor_set(),
+                this->target_manager.descriptor_set()
+            }, 
+            {}
         );
         command_buffer.draw(3, 1, 0, 0);
         command_buffer.endRendering();
+
+        this->target_manager.use(
+            command_buffer,
+            this->swapchain_target,
+            RenderTargetUsage()
+                .set_new_state(
+                    RenderTargetSubresourceState()
+                        .set_layout(vk::ImageLayout::ePresentSrcKHR)
+                )
+        );
     }
 
     void record_image_barrier(vk::CommandBuffer command_buffer, vk::ImageMemoryBarrier2 barrier) {
@@ -1163,17 +976,20 @@ private:
         return command_buffer;
     }
 
-    void submit_frame_commands(vk::CommandBuffer command_buffer, const SwapchainImage& image) {
+    void submit_frame_commands(
+        vk::CommandBuffer command_buffer, 
+        const SwapchainTexture& swapchain_texture
+    ) {
         vk_expect(command_buffer.end(), "Failed to end command buffer");
 
         auto command_buffer_info = vk::CommandBufferSubmitInfo().setCommandBuffer(command_buffer);
 
         auto wait_info = vk::SemaphoreSubmitInfo()
-            .setSemaphore(image.available)
+            .setSemaphore(swapchain_texture.available)
             .setStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput);
 
         auto signal_info = vk::SemaphoreSubmitInfo()
-            .setSemaphore(image.presentable)
+            .setSemaphore(swapchain_texture.presentable)
             .setStageMask(vk::PipelineStageFlagBits2::eAllCommands);
 
         vk_expect(
@@ -1194,9 +1010,6 @@ private:
     SwapchainConfigureInfo swapchain_info;
     bool should_reconfigure_swapchain = false;
 
-    std::vector<Texture> hdr_textures;
-    std::vector<Texture> depth_textures;
-
     std::vector<vk::Fence> fences;              // One per frame in flight
     std::vector<vk::Semaphore> image_available; // One per frame in flight
 
@@ -1208,16 +1021,17 @@ private:
 
     vk::Pipeline pipeline;
     vk::PipelineLayout pipeline_layout;
-    
+
     vk::Pipeline tonemap_pipeline;
     vk::PipelineLayout tonemap_pipeline_layout;
-    vk::DescriptorPool tonemap_descriptor_pool;
-    vk::DescriptorSetLayout tonemap_set_layout;
-    std::vector<vk::DescriptorSet> tonemap_sets;
-    vk::Sampler tonemap_sampler;
+
+    RenderTargetId swapchain_target;
+    RenderTargetId hdr_target;
+    RenderTargetId depth_target;
 
     Uploader uploader;
     FrameArenaBuffer frame_arena;
+    RenderTargetManager target_manager;
     TextureManager texture_manager;
     MaterialManager material_manager;
     MeshManager mesh_manager;

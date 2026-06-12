@@ -2,6 +2,7 @@
 #include <memory>
 #include <vulkan/vulkan.hpp>
 #include "device.h"
+#include "texture.h"
 
 struct SwapchainConfigureInfo {
     vk::PresentModeKHR present_mode = vk::PresentModeKHR::eMailbox;
@@ -24,10 +25,9 @@ struct SwapchainConfigureInfo {
     }
 };
 
-struct SwapchainImage {
+struct SwapchainTexture {
     uint32_t index;
-    vk::Image image;
-    vk::ImageView view;
+    const Texture* texture;
     vk::Semaphore available;
     vk::Semaphore presentable;
 };
@@ -76,8 +76,8 @@ public:
     }
     
     vk::Result configure(const DeviceHandle& device, const SwapchainConfigureInfo& info);
-    vk::Result present(const SwapchainImage& image);
-    std::tuple<vk::Result, SwapchainImage> acquire_image(vk::Semaphore image_available);
+    vk::Result present(const SwapchainTexture& texture);
+    std::tuple<vk::Result, SwapchainTexture> acquire_texture(vk::Semaphore image_available);
 
 private:
     InstanceHandle instance;
@@ -86,10 +86,9 @@ private:
 
     vk::Extent2D extent_;
     vk::Format format_ = vk::Format::eUndefined;
-    std::vector<vk::Image> images;
 
     vk::SurfaceKHR surface_;
     vk::SwapchainKHR swapchain;
-    std::vector<vk::ImageView> views;
+    std::vector<Texture> textures;
     std::vector<vk::Semaphore> presentable;
 };

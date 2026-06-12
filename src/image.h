@@ -4,16 +4,7 @@
 #include <optional>
 #include <vector>
 #include <span>
-
-enum class Sampler: uint8_t {
-    LinearRepeat = 0,
-    NearestRepeat,
-    LinearMirrored,
-    NearestMirrored,
-    LinearClamp,
-    NearestClamp,
-    Count,
-};
+#include "texture_filtering.h"
 
 enum class ImageFormat: uint8_t {
     Undefined,

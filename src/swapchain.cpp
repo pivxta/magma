@@ -20,10 +20,9 @@ Swapchain::Swapchain(Swapchain&& other) noexcept
       target(std::move(other.target)),
       extent_(other.extent_),
       format_(other.format_),
-      images(std::move(other.images)),
       surface_(std::exchange(other.surface_, nullptr)),
       swapchain(std::exchange(other.swapchain, nullptr)),
-      views(std::move(other.views)),
+      textures(std::move(other.textures)),
       presentable(std::move(other.presentable)) {}
 
 Swapchain& Swapchain::operator=(Swapchain&& other) noexcept {
@@ -33,10 +32,9 @@ Swapchain& Swapchain::operator=(Swapchain&& other) noexcept {
         std::swap(this->target, other.target);
         std::swap(this->extent_, other.extent_);
         std::swap(this->format_, other.format_);
-        std::swap(this->images, other.images);
         std::swap(this->surface_, other.surface_);
         std::swap(this->swapchain, other.swapchain);
-        std::swap(this->views, other.views);
+        std::swap(this->textures, other.textures);
         std::swap(this->presentable, other.presentable);
     }
     return *this;
@@ -68,45 +66,11 @@ static vk::Result recreate_semaphores(
     return vk::Result::eSuccess;
 }
 
-static void destroy_views(vk::Device device, std::vector<vk::ImageView>& views) {
-    for (auto& view : views) {
-        if (view) {
-            device.destroyImageView(view);
-            view = nullptr;
-        }
-    }
-}
 
-static vk::Result recreate_views(
-    vk::Device device,
-    std::vector<vk::ImageView>& views,
-    const std::vector<vk::Image>& images,
-    vk::Format format
-) {
-    destroy_views(device, views);
-    views.resize(images.size());
-    for (size_t i = 0; i < views.size(); i++) {
-        auto [result, view] = device.createImageView(
-            vk::ImageViewCreateInfo()
-                .setImage(images[i])
-                .setFormat(format)
-                .setComponents(vk::ComponentMapping())
-                .setViewType(vk::ImageViewType::e2D)
-                .setSubresourceRange(
-                    vk::ImageSubresourceRange()
-                        .setAspectMask(vk::ImageAspectFlagBits::eColor)
-                        .setBaseMipLevel(0)
-                        .setLevelCount(1)
-                        .setBaseArrayLayer(0)
-                        .setLayerCount(1)
-                )
-        );
-        if (result != vk::Result::eSuccess) {
-            return result;
-        }
-        views[i] = view;
+static void destroy_textures(const DeviceHandle& device, std::vector<Texture>& textures) {
+    for (auto& texture: textures) {
+        texture.destroy(device);
     }
-    return vk::Result::eSuccess;
 }
 
 static vk::Extent2D pick_extent(
@@ -197,6 +161,7 @@ vk::Result Swapchain::configure(const DeviceHandle& device, const SwapchainConfi
         return create_result;
     }
 
+    destroy_textures(device, this->textures);
     if (this->swapchain) {
         device->logical.destroySwapchainKHR(this->swapchain);
     }
@@ -204,19 +169,24 @@ vk::Result Swapchain::configure(const DeviceHandle& device, const SwapchainConfi
     this->extent_ = extent;
     this->format_ = surface_format.format;
 
-    auto [images_result, swapchain_images] =
+    auto [images_result, new_images] =
         device->logical.getSwapchainImagesKHR(this->swapchain);
     if (images_result != vk::Result::eSuccess) {
         return images_result;
     }
-    this->images = std::move(swapchain_images);
 
-    if (auto result = recreate_views(device->logical, this->views, this->images, this->format_);
-        result != vk::Result::eSuccess) 
-    {
-        return result;
+    this->textures.resize(new_images.size());
+    for (size_t i = 0; i < new_images.size(); i++) {
+        this->textures[i] = Texture(
+            device, new_images[i],
+            vk::ImageType::e2D,
+            this->format(),
+            vk::Extent3D(this->extent(), 1),
+            vk::ImageUsageFlagBits::eColorAttachment
+        );
     }
-    if (auto result = recreate_semaphores(device->logical, this->presentable, this->images.size());
+
+    if (auto result = recreate_semaphores(device->logical, this->presentable, this->textures.size());
         result != vk::Result::eSuccess) 
     {
         return result;
@@ -225,29 +195,28 @@ vk::Result Swapchain::configure(const DeviceHandle& device, const SwapchainConfi
     return vk::Result::eSuccess;
 }
 
-std::tuple<vk::Result, SwapchainImage> Swapchain::acquire_image(vk::Semaphore image_available) {
+std::tuple<vk::Result, SwapchainTexture> Swapchain::acquire_texture(vk::Semaphore image_available) {
     auto [result, index] = this->device->logical.acquireNextImageKHR(
         this->swapchain,
         std::numeric_limits<uint64_t>::max(),
         image_available
     );
     if (result != vk::Result::eSuccess && result != vk::Result::eSuboptimalKHR) {
-        return {result, SwapchainImage{}};
+        return {result, SwapchainTexture{}};
     }
 
     return {
         result,
-        SwapchainImage{
+        SwapchainTexture{
             .index = index,
-            .image = this->images[index],
-            .view = this->views[index],
+            .texture = &this->textures[index],
             .available = image_available,
             .presentable = this->presentable[index]
         }
     };
 }
 
-vk::Result Swapchain::present(const SwapchainImage& image) {
+vk::Result Swapchain::present(const SwapchainTexture& image) {
     return this->device->graphics_queue.presentKHR(
         vk::PresentInfoKHR()
             .setSwapchains(this->swapchain)
@@ -260,7 +229,7 @@ Swapchain::~Swapchain() {
     if (this->device) {
         this->device->wait_idle();
         destroy_semaphores(this->device->logical, this->presentable);
-        destroy_views(this->device->logical, this->views);
+        destroy_textures(this->device, this->textures);
         if (this->swapchain) {
             this->device->logical.destroySwapchainKHR(this->swapchain);
         }

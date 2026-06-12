@@ -20,10 +20,10 @@ struct DeviceContext {
     InstanceHandle instance;
     vk::PhysicalDeviceProperties2 properties;
     vk::PhysicalDevice physical;
+    vma::Allocator allocator;
     vk::Device logical;
     vk::Queue graphics_queue;
     uint32_t graphics_queue_family = 0;
-    vma::Allocator allocator;
 
     ~DeviceContext();
 

@@ -18,6 +18,7 @@ public:
 
     explicit SlotMap(uint32_t size_limit) {
         this->size_limit = size_limit;
+        this->slots.reserve(size_limit);
     }
  
     bool is_valid(SlotKey<T> key) const {
@@ -107,6 +108,10 @@ public:
         }
         this->slots.clear();
         this->free_indices.clear();
+    }
+
+    std::optional<uint32_t> capacity() const {
+        return this->size_limit;
     }
  
 private:

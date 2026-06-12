@@ -1,7 +1,6 @@
 #pragma once
 #include <cstdint>
 #include <vector>
-#include <span>
 #include <vulkan/vulkan.hpp>
 #include <vk_mem_alloc.hpp>
 #include "image.h"
@@ -11,6 +10,7 @@
 #include "texture_indices.h"
 #include "uploader.h"
 #include "mip_map.h"
+#include "bindless_set.h"
 
 enum class TextureFallback: uint8_t {
     ColorError,
@@ -26,19 +26,19 @@ public:
     TextureManager() = default;
 
     TextureManager(
-        DeviceHandle device,
+        const DeviceHandle& device,
         Uploader& uploader,
         uint32_t frames_in_flight,
-        uint32_t max_textures
+        uint32_t max_textures,
+        const GlobalSamplerInfo& sampler_info = {}
     );
 
     TextureManager(const TextureManager&) = delete;
     TextureManager& operator=(const TextureManager&) = delete;
     TextureManager(TextureManager&&) noexcept = default;
     TextureManager& operator=(TextureManager&&) noexcept = default;
-    ~TextureManager();
 
-    void destroy_pending();
+    void update_pending();
     
     TextureIndices get(TextureId id, TextureFallback fallback = TextureFallback::ColorError) const;
     TextureIndices get_fallback(TextureFallback fallback = TextureFallback::ColorError) const;
@@ -57,8 +57,12 @@ public:
     );
     void free(TextureId id);
 
+    void configure_samplers(const GlobalSamplerInfo& info) {
+        this->bindless_set.configure_samplers(info);
+    }
+
     void begin_frame(uint64_t frame_counter) {
-        this->frame_counter = frame_counter;
+        this->bindless_set.begin_frame(frame_counter);
     }
 
     void clear_updated() {
@@ -74,21 +78,16 @@ public:
     }
 
     vk::DescriptorSetLayout descriptor_set_layout() const {
-        return this->desc_set_layout;
+        return this->bindless_set.descriptor_set_layout();
     }
     
     vk::DescriptorSet descriptor_set() const {
-        return this->desc_set;
+        return this->bindless_set.descriptor_set();
     }
     
 private:
-    void create_fallbacks(Uploader& uploader);
-    void create_samplers();
-    void bind_samplers(vk::DescriptorSet set, std::span<Sampler> types);
-    void destroy_samplers();
-
     std::optional<SlotKey<Texture>> create_texture(Uploader& uploader, const Image& image);
-    void destroy_texture(SlotKey<Texture> key);
+    void create_fallbacks(Uploader& uploader);
 
     struct Slot {
         uint32_t sampler_index;
@@ -101,28 +100,12 @@ private:
     static TextureIndices get_slot_indices(const Slot& slot);
     TextureIndices get_fallback_indices(TextureFallback fallback) const;
 
-    struct PendingDestroy {
-        uint64_t request_frame;
-        SlotKey<Texture> texture;
-    };
-
-    using Samplers = std::array<vk::Sampler, static_cast<size_t>(Sampler::Count)>;
     using Fallbacks = std::array<SlotKey<Texture>, static_cast<size_t>(TextureFallback::Count)>;
 
-    DeviceHandle device;
-
-    vk::DescriptorPool desc_pool;
-    vk::DescriptorSetLayout desc_set_layout;
-    vk::DescriptorSet desc_set;
-
+    BindlessSet bindless_set;
     MipmapGenerator mipmap_generator;
 
     std::vector<TextureId> updated;
     SlotMap<Slot> slots;
-    SlotMap<Texture> textures;
-    Samplers samplers;
     Fallbacks fallbacks;
-    std::deque<PendingDestroy> destroy_queue;
-    uint32_t frames_in_flight;
-    uint64_t frame_counter = 0;
 };
