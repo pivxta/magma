@@ -3,30 +3,43 @@ import render_targets;
 
 interface Light {
     bool should_cull(float3 position);
-    float get_shadow_factor(float3 position);
+    float get_shadow_factor(float3 position, float4x4 world_to_view);
     float3 get_incident_radiance(float3 position);
     float3 get_omega_i(float3 position);
 };
+
+static const uint MAX_CASCADES = 4;
 
 struct DirectionalLight: Light {
     float3 direction;
     float padding;
     float3 color;
     float illuminance;
+
     bool shadows_enabled;
-    float4x4 world_to_shadow_clip;
+    float[MAX_CASCADES] cascade_depths;
+    float4x4[MAX_CASCADES] cascade_world_to_clip;
     RenderTargetIndices shadow_map;
 
     bool should_cull(float3 position) {
         return false;
     }
 
-    float get_shadow_factor(float3 position) {
+    float get_shadow_factor(float3 position, float4x4 world_to_view) {
         if (!this.shadows_enabled) {
             return 1.0;
         }
 
-        var shadow_clip_position = mul(this.world_to_shadow_clip, float4(position, 1.0));
+        let position_view_space = mul(world_to_view, float4(position, 1.0)).xyz;
+        uint cascade = MAX_CASCADES - 1;
+        for (uint i = 0; i < MAX_CASCADES - 1; i++) {
+            if (position_view_space.z < this.cascade_depths[i]) {
+                cascade = i;
+                break;
+            }
+        }
+
+        var shadow_clip_position = mul(this.cascade_world_to_clip[cascade], float4(position, 1.0));
         shadow_clip_position /= shadow_clip_position.w;
         if (shadow_clip_position.x < -1.0 
             || shadow_clip_position.x > 1.0
@@ -35,8 +48,8 @@ struct DirectionalLight: Light {
             return 1.0;
         }
 
-        let shadow_map_coords = 0.5 * shadow_clip_position.xy + 0.5;
-        return this.shadow_map.sample_cmp(shadow_map_coords, shadow_clip_position.z);
+        let shadow_map_coords = float3(0.5 * shadow_clip_position.xy + 0.5, cascade);
+        return this.shadow_map.sample_cmp_array(shadow_map_coords, shadow_clip_position.z);
     }
 
     float3 get_incident_radiance(float3 position) {
@@ -61,7 +74,7 @@ struct PointLight: Light {
         return dot(fragment_to_light, fragment_to_light) > this.radius * this.radius;
     }
 
-    float get_shadow_factor(float3 position) {
+    float get_shadow_factor(float3 position, float4x4 world_to_view) {
         return 1.0;
     }
 

@@ -5,9 +5,10 @@
 RenderTargetManager::RenderTargetManager(
     const DeviceHandle& device, 
     uint32_t frames_in_flight,
-    uint32_t max_targets
+    uint32_t max_targets,
+    uint32_t max_array_targets
 ): 
-    bindless_set(device, frames_in_flight, max_targets),
+    bindless_set(device, frames_in_flight, max_targets, max_array_targets),
     targets(max_targets)
 {
     this->frames_in_flight = frames_in_flight;
@@ -344,8 +345,8 @@ uint32_t RenderTargetManager::get_current_bindless_index(const Target& target) c
     assert(target.owned);
     
     if (target.buffering == RenderTargetBuffering::PerFif) {
-        return target.keys[this->frame_index].index;
+        return target.keys[this->frame_index].index();
     } else {
-        return target.keys[0].index;
+        return target.keys[0].index();
     }
 }

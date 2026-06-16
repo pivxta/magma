@@ -4,14 +4,23 @@
 static constexpr uint32_t NORMAL_SAMPLER_COUNT = static_cast<uint32_t>(Sampler::Count);
 static constexpr uint32_t CMP_SAMPLER_COUNT = static_cast<uint32_t>(ComparisonSampler::Count);
 
-static vk::DescriptorPool create_descriptor_pool(vk::Device device, uint32_t max_textures) {
+static constexpr uint32_t TEXTURE_BINDING = 0;
+static constexpr uint32_t TEXTURE_ARRAY_BINDING = 1;
+static constexpr uint32_t NORMAL_SAMPLER_BINDING = 2;
+static constexpr uint32_t CMP_SAMPLER_BINDING = 3;
+
+static vk::DescriptorPool create_descriptor_pool(
+    vk::Device device, 
+    uint32_t max_textures,
+    uint32_t max_texture_arrays
+) {
     std::array pool_sizes = {
         vk::DescriptorPoolSize()
             .setType(vk::DescriptorType::eSampler)
             .setDescriptorCount(NORMAL_SAMPLER_COUNT + CMP_SAMPLER_COUNT),
         vk::DescriptorPoolSize()
             .setType(vk::DescriptorType::eSampledImage)
-            .setDescriptorCount(max_textures),
+            .setDescriptorCount(max_textures + max_texture_arrays),
     };
     auto [result, descriptor_pool] = device.createDescriptorPool(
         vk::DescriptorPoolCreateInfo()
@@ -23,30 +32,43 @@ static vk::DescriptorPool create_descriptor_pool(vk::Device device, uint32_t max
     return descriptor_pool;
 }
 
-static vk::DescriptorSetLayout create_set_layout(vk::Device device, uint32_t max_textures) {
+static vk::DescriptorSetLayout create_set_layout(
+    vk::Device device, 
+    uint32_t max_textures,
+    uint32_t max_texture_arrays
+) {
     std::array bindings = {
         vk::DescriptorSetLayoutBinding()
-            .setBinding(0)
+            .setBinding(TEXTURE_BINDING)
             .setDescriptorType(vk::DescriptorType::eSampledImage)
             .setDescriptorCount(max_textures)
             .setStageFlags(vk::ShaderStageFlagBits::eFragment),
         vk::DescriptorSetLayoutBinding()
-            .setBinding(1)
+            .setBinding(TEXTURE_ARRAY_BINDING)
+            .setDescriptorType(vk::DescriptorType::eSampledImage)
+            .setDescriptorCount(max_texture_arrays)
+            .setStageFlags(vk::ShaderStageFlagBits::eFragment),
+        vk::DescriptorSetLayoutBinding()
+            .setBinding(NORMAL_SAMPLER_BINDING)
             .setDescriptorType(vk::DescriptorType::eSampler)
             .setDescriptorCount(NORMAL_SAMPLER_COUNT)
             .setStageFlags(vk::ShaderStageFlagBits::eFragment),
         vk::DescriptorSetLayoutBinding()
-            .setBinding(2)
+            .setBinding(CMP_SAMPLER_BINDING)
             .setDescriptorType(vk::DescriptorType::eSampler)
             .setDescriptorCount(CMP_SAMPLER_COUNT)
             .setStageFlags(vk::ShaderStageFlagBits::eFragment),
     };
 
-    std::array<vk::DescriptorBindingFlags, 3> binding_flags = {
+    std::array<vk::DescriptorBindingFlags, 4> binding_flags = {
         vk::DescriptorBindingFlagBits::eUpdateAfterBind
             | vk::DescriptorBindingFlagBits::ePartiallyBound,
-        vk::DescriptorBindingFlagBits::ePartiallyBound, 
-        vk::DescriptorBindingFlagBits::ePartiallyBound
+        vk::DescriptorBindingFlagBits::eUpdateAfterBind
+            | vk::DescriptorBindingFlagBits::ePartiallyBound,
+        vk::DescriptorBindingFlagBits::eUpdateAfterBind
+            | vk::DescriptorBindingFlagBits::ePartiallyBound,
+        vk::DescriptorBindingFlagBits::eUpdateAfterBind
+            | vk::DescriptorBindingFlagBits::ePartiallyBound,
     };
 
     auto [result1, layout] = device.createDescriptorSetLayout(
@@ -80,14 +102,16 @@ BindlessSet::BindlessSet(
     DeviceHandle device, 
     uint32_t frames_in_flight,
     uint32_t max_textures,
+    uint32_t max_texture_arrays,
     const TextureSamplerInfo& sampler_info
 ):
-    textures(max_textures)
+    textures(max_textures),
+    texture_arrays(max_texture_arrays)
 {
     this->device = std::move(device);
     this->frames_in_flight = frames_in_flight;
-    this->desc_pool = create_descriptor_pool(this->device->logical, max_textures);
-    this->desc_set_layout = create_set_layout(this->device->logical, max_textures);
+    this->desc_pool = create_descriptor_pool(this->device->logical, max_textures, max_texture_arrays);
+    this->desc_set_layout = create_set_layout(this->device->logical, max_textures, max_texture_arrays);
     this->desc_set = create_set(this->device->logical, this->desc_pool, this->desc_set_layout);
     this->sampler_info = sampler_info;
     this->create_samplers();
@@ -101,6 +125,9 @@ BindlessSet::~BindlessSet() {
     this->device->logical.destroyDescriptorPool(this->desc_pool);
     this->destroy_samplers();
     this->textures.clear([&](Texture& texture) {
+        texture.destroy(this->device);
+    });
+    this->texture_arrays.clear([&](Texture& texture) {
         texture.destroy(this->device);
     });
 }
@@ -126,23 +153,35 @@ void BindlessSet::update_pending() {
 std::optional<BindlessKey> BindlessSet::add_texture(
     const std::function<Texture(const DeviceHandle&)>& create
 ) {
-    if (auto key = this->textures.reserve(); key.has_value()) {
-        Texture texture = create(this->device);
+    Texture texture = create(this->device);
+
+    auto key_type = texture.array_layers() == 1 ? 
+        BindlessType::Texture2D :
+        BindlessType::Texture2DArray;
+    auto& slot_map = *this->get_slot_map(key_type);
+
+    if (auto key = slot_map.reserve(); key.has_value()) {
         auto info = vk::DescriptorImageInfo()
             .setImageView(texture.default_view())
             .setImageLayout(vk::ImageLayout::eShaderReadOnlyOptimal);
-        this->device->logical.updateDescriptorSets(
-            vk::WriteDescriptorSet()
-                .setDstSet(this->desc_set)
-                .setDstBinding(0)
-                .setDstArrayElement(key->index)
-                .setDescriptorType(vk::DescriptorType::eSampledImage)
-                .setImageInfo(info),
-            {}
-        );
-        *this->textures.get(key.value()) = texture;
-        return key;
+        auto write = vk::WriteDescriptorSet()
+            .setDstSet(this->desc_set)
+            .setDstArrayElement(key->index)
+            .setDescriptorType(vk::DescriptorType::eSampledImage)
+            .setImageInfo(info);
+        if (texture.array_layers() == 1) {
+            write.setDstBinding(TEXTURE_BINDING);
+        } else {
+            write.setDstBinding(TEXTURE_ARRAY_BINDING);
+        }
+        this->device->logical.updateDescriptorSets(write, {});
+        *slot_map.get(key.value()) = texture;
+        return BindlessKey{
+            .type = key_type,
+            .key = key.value()
+        };
     }
+    texture.destroy(this->device);
     return std::nullopt;
 }
 
@@ -154,7 +193,7 @@ void BindlessSet::free_texture(BindlessKey key) {
 }
 
 const Texture* BindlessSet::get_texture(BindlessKey key) const {
-    return this->textures.get(key);
+    return this->get_slot_map(key.type)->get(key.key);
 }
 
 static uint32_t get_sampler_index(Sampler sampler) {
@@ -313,7 +352,7 @@ void BindlessSet::bind_samplers(vk::DescriptorSet set) {
         writes.push_back(
             vk::WriteDescriptorSet()
                 .setDstSet(set)
-                .setDstBinding(1)
+                .setDstBinding(NORMAL_SAMPLER_BINDING)
                 .setDstArrayElement(index)
                 .setDescriptorType(vk::DescriptorType::eSampler)
                 .setImageInfo(infos.back())
@@ -330,7 +369,7 @@ void BindlessSet::bind_samplers(vk::DescriptorSet set) {
         writes.push_back(
             vk::WriteDescriptorSet()
                 .setDstSet(set)
-                .setDstBinding(2)
+                .setDstBinding(CMP_SAMPLER_BINDING)
                 .setDstArrayElement(index)
                 .setDescriptorType(vk::DescriptorType::eSampler)
                 .setImageInfo(infos.back())
@@ -353,8 +392,29 @@ void BindlessSet::destroy_samplers() {
     }
 }
 
+const SlotMap<Texture>* BindlessSet::get_slot_map(BindlessType type) const {
+    switch (type) {
+    case BindlessType::Texture2D:
+        return &this->textures;
+    case BindlessType::Texture2DArray:
+        return &this->texture_arrays;
+    }
+    std::unreachable();
+    return nullptr;
+}
+
+SlotMap<Texture>* BindlessSet::get_slot_map(BindlessType type) {
+    switch (type) {
+    case BindlessType::Texture2D:
+        return &this->textures;
+    case BindlessType::Texture2DArray:
+        return &this->texture_arrays;
+    }
+    return nullptr;
+}
+
 void BindlessSet::destroy_texture(BindlessKey key) {
-    this->textures.free(key, [&](Texture& texture) {
+    this->get_slot_map(key.type)->free(key.key, [&](Texture& texture) {
         texture.destroy(this->device);
         texture = Texture{};
     });

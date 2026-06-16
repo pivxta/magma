@@ -31,12 +31,13 @@ public float3 calculate_radiance<B: Brdf, L: Light>(
     B brdf,
     SurfaceSample sample,
     float3 view_position,
+    float4x4 world_to_view
 ) {
     if (light.should_cull(sample.position)) {
         return float3(0.0);
     }
 
-    let shadow_factor = light.get_shadow_factor(sample.position);
+    let shadow_factor = light.get_shadow_factor(sample.position, world_to_view);
     if (shadow_factor < 0.001) {
         return float3(0.0);
     }

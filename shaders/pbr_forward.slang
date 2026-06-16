@@ -35,6 +35,7 @@ struct Draw {
 
 struct View {
     float4x4 world_to_clip;
+    float4x4 world_to_view;
     float3 position;
 }
 
@@ -107,7 +108,8 @@ float4 fragment_main(FragmentInput input) : SV_Target {
             constants.directional_lights[i], 
             brdf,
             fragment,
-            constants.view.position
+            constants.view.position,
+            constants.view.world_to_view
         );
     }
     
@@ -116,7 +118,8 @@ float4 fragment_main(FragmentInput input) : SV_Target {
             constants.point_lights[i], 
             brdf,
             fragment,
-            constants.view.position
+            constants.view.position,
+            constants.view.world_to_view
         );
     }
 

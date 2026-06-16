@@ -229,7 +229,9 @@ static bool create_device_and_queue(DeviceContext& device) {
                 .setDescriptorBindingSampledImageUpdateAfterBind(true)
                 .setShaderSampledImageArrayNonUniformIndexing(true),
 
-            vk::PhysicalDeviceVulkan11Features().setShaderDrawParameters(true)
+            vk::PhysicalDeviceVulkan11Features()
+                .setShaderDrawParameters(true)
+                .setMultiview(true)
         }.get()
     );
     if (result != vk::Result::eSuccess) {

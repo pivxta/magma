@@ -4,7 +4,19 @@
 #include "texture_filtering.h"
 #include "slot_map.h"
 
-using BindlessKey = SlotKey<Texture>;
+enum class BindlessType: uint8_t {
+    Texture2D,
+    Texture2DArray
+};
+
+struct BindlessKey { 
+    BindlessType type;
+    SlotKey<Texture> key;
+
+    uint32_t index() const {
+        return key.index;
+    }
+};
 
 class BindlessSet {
 public:
@@ -13,7 +25,8 @@ public:
     BindlessSet(
         DeviceHandle device, 
         uint32_t frames_in_flight,
-        uint32_t texture_descriptor_count,
+        uint32_t max_textures,
+        uint32_t max_texture_arrays,
         const TextureSamplerInfo& sampler_info = {}
     );
 
@@ -50,6 +63,8 @@ public:
     }
 
 private:
+    SlotMap<Texture>* get_slot_map(BindlessType type);
+    const SlotMap<Texture>* get_slot_map(BindlessType type) const;
     void destroy_texture(BindlessKey texture);
     void bind_samplers(vk::DescriptorSet set);
     void create_samplers();
@@ -70,6 +85,7 @@ private:
     using CmpSamplers = std::array<vk::Sampler, static_cast<size_t>(ComparisonSampler::Count)>;
 
     SlotMap<Texture> textures;
+    SlotMap<Texture> texture_arrays;
     std::deque<PendingDestroy> destroy_queue;
     Samplers samplers;
     CmpSamplers cmp_samplers;

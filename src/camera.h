@@ -13,33 +13,30 @@ struct OrthographicProjection {
     
     [[nodiscard]]
     glm::mat4 view_to_clip(float viewport_width, float viewport_height) const {
-        float aspect_ratio = viewport_width / viewport_height;
-        float h = this->viewport_height * this->scale;
-        float w = h * aspect_ratio;
-
-        auto m = glm::mat4(0.0f);
-        m[0][0] = 2.0f / w;
-        m[1][1] = 2.0f / h;
-        m[2][2] = 1.0f / (this->far - this->near);
-        m[3][2] = this->far / (this->far - this->near);
-        m[3][3] = 1.0f;
-        return m;
+        float half_height = 0.5f * this->viewport_height * this->scale;
+        float half_width = half_height * (viewport_width / viewport_height);
+        return glm::orthoLH_ZO(
+            -half_width, half_width,
+            -half_height, half_height,
+            this->far, this->near
+        );
     }
 };
 
 struct PerspectiveProjection {
     float fov_radians = glm::radians(90.0f);
     float near = 0.001f;
+    float far = 1000.0f;
     
     [[nodiscard]]
     glm::mat4 view_to_clip(float viewport_width, float viewport_height) const {
-        float f = 1.0f / std::tan(this->fov_radians * 0.5f);
-        auto m = glm::mat4(0.0f);
-        m[0][0] = f * viewport_height / viewport_width;
-        m[1][1] = f;
-        m[2][3] = 1.0f;
-        m[3][2] = this->near;
-        return m;
+        return glm::perspectiveFovLH_ZO(
+            this->fov_radians,
+            viewport_width,
+            viewport_height,
+            this->far,
+            this->near
+        );
     }
 };
 
@@ -53,6 +50,16 @@ static inline glm::mat4 get_view_to_clip(const Projection& projection, float wid
     return std::visit([width, height](const auto& proj) -> glm::mat4 {
         return proj.view_to_clip(width, height);
     }, projection);
+}
+
+[[nodiscard]]
+static inline float get_projection_near(const Projection& projection) {
+    return std::visit([](const auto& proj) { return proj.near; }, projection);
+}
+
+[[nodiscard]]
+static inline float get_projection_far(const Projection& projection) {
+    return std::visit([](const auto& proj) { return proj.far; }, projection);
 }
 
 struct Film {
@@ -88,6 +95,16 @@ struct Camera {
     Camera& set_active(bool active = true) {
         this->active = active;
         return *this;
+    }
+
+    [[nodiscard]]
+    float near() const {
+        return get_projection_near(this->projection);
+    }
+
+    [[nodiscard]]
+    float far() const {
+        return get_projection_far(this->projection);
     }
 
     [[nodiscard]]

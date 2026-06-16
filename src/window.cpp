@@ -285,6 +285,7 @@ struct Window::Inner: Target {
     }
 
     void create(uint32_t width, uint32_t height, const char *title) {
+        glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
         glfwInit();
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);

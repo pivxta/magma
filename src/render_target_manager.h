@@ -203,7 +203,8 @@ public:
     RenderTargetManager(
         const DeviceHandle& device, 
         uint32_t frames_in_flight,
-        uint32_t max_targets
+        uint32_t max_targets,
+        uint32_t max_array_targets
     );
 
     RenderTargetManager(const RenderTargetManager&) = delete;

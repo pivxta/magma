@@ -268,7 +268,8 @@ private:
         this->scene.add(
             DirectionalLight()
                 .set_illuminance(4.0f)
-                .set_direction(glm::vec3(18.0f, 2.0f, 0.5f))
+                .set_direction(glm::vec3(3.0f, 2.0f, 0.5f))
+                .set_shadows_enabled(true)
         );
     }
 

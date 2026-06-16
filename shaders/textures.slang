@@ -1,6 +1,6 @@
 [[vk::binding(0, 0)]]
 Texture2D[] textures;
-[[vk::binding(1, 0)]]
+[[vk::binding(2, 0)]]
 SamplerState[] samplers;
 
 public struct TextureIndices {

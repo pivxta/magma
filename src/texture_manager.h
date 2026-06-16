@@ -29,6 +29,7 @@ public:
         Uploader& uploader,
         uint32_t frames_in_flight,
         uint32_t max_textures,
+        uint32_t max_texture_arrays,
         const TextureSamplerInfo& sampler_info = {}
     );
 

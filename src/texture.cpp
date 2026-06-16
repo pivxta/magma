@@ -44,6 +44,7 @@ Texture::Texture(const DeviceHandle& device, const vk::ImageCreateInfo& info) {
     );
 }
 
+// Borrowed texture wrapper, for swapchains mainly.
 Texture::Texture(
     const DeviceHandle& device,
     vk::Image image,

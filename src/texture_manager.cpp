@@ -8,9 +8,10 @@ TextureManager::TextureManager(
     Uploader& uploader,
     uint32_t frames_in_flight,
     uint32_t max_textures,
+    uint32_t max_texture_arrays,
     const TextureSamplerInfo& sampler_info
 ):
-    bindless_set(device, frames_in_flight, max_textures, sampler_info)
+    bindless_set(device, frames_in_flight, max_textures, max_texture_arrays, sampler_info)
 {
     this->create_fallbacks(uploader);
 }
@@ -28,7 +29,7 @@ TextureId TextureManager::get_texture_id(SlotKey<Slot> key) {
 
 TextureIndices TextureManager::get_slot_indices(const Slot& slot) {
     return {
-        .texture = slot.texture.value_or(slot.fallback).index,
+        .texture = slot.texture.value_or(slot.fallback).index(),
         .sampler = slot.sampler_index
     };
 }
@@ -43,7 +44,7 @@ SlotKey<TextureManager::Slot> TextureManager::get_slot_key(TextureId id) {
 TextureIndices TextureManager::get_fallback_indices(TextureFallback fallback) const {
     uint32_t fallback_index = get_fallback_index(fallback);
     uint32_t sampler_index = this->bindless_set.get_sampler(Sampler::NearestRepeat);
-    uint32_t texture_index = this->fallbacks[fallback_index].index;
+    uint32_t texture_index = this->fallbacks[fallback_index].index();
     return {
         .texture = texture_index,
         .sampler = sampler_index
