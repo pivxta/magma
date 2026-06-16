@@ -40,7 +40,7 @@ MeshManager::MeshManager(
     );
 }
 
-SlotKey<MeshManager::MeshSubBuffers> MeshManager::get_slot_key(MeshId id) {
+SlotKey<MeshManager::MeshData> MeshManager::get_slot_key(MeshId id) {
     return {
         .index = id.index,
         .generation = id.generation
@@ -48,7 +48,7 @@ SlotKey<MeshManager::MeshSubBuffers> MeshManager::get_slot_key(MeshId id) {
 }
 
 MeshId MeshManager::reserve() {
-    SlotKey<MeshSubBuffers> key = this->meshes.insert({}).value();
+    SlotKey<MeshData> key = this->meshes.insert({}).value();
     return MeshId{
         .index = key.index,
         .generation = key.generation
@@ -57,20 +57,20 @@ MeshId MeshManager::reserve() {
 
 MeshId MeshManager::add(Uploader& uploader, const Mesh& mesh) {
     MeshId id = this->reserve();
-    if (auto sub_buffers = this->create_sub_buffers(uploader, mesh)) {
+    if (auto sub_buffers = this->create_data(uploader, mesh)) {
         *this->meshes.get(get_slot_key(id)) = sub_buffers.value();
     }
     return id;
 }
 
-MeshData MeshManager::get(MeshId id) const {
-    if (auto sub_buffers = this->meshes.get(get_slot_key(id)); sub_buffers != nullptr) {
-        assert(sub_buffers->indices.buffer_offset() % sizeof(uint32_t) == 0);
-        auto index_offset = sub_buffers->indices.buffer_offset() / sizeof(uint32_t);
+MeshDrawData MeshManager::get_draw_data(MeshId id) const {
+    if (auto data = this->meshes.get(get_slot_key(id)); data != nullptr) {
+        assert(data->indices.buffer_offset() % sizeof(uint32_t) == 0);
+        auto index_offset = data->indices.buffer_offset() / sizeof(uint32_t);
         return {
-            .vertices_address = sub_buffers->vertices.address(), 
+            .vertices_address = data->vertices.address(), 
             .index_offset = static_cast<uint32_t>(index_offset),
-            .index_count = static_cast<uint32_t>(sub_buffers->indices.length()),
+            .index_count = static_cast<uint32_t>(data->indices.length()),
         };
     }
     return {
@@ -80,14 +80,21 @@ MeshData MeshManager::get(MeshId id) const {
     };
 }
 
+Aabb MeshManager::get_bounds(MeshId id) const {
+    if (auto data = this->meshes.get(get_slot_key(id)); data != nullptr) {
+        return data->bounds;
+    }
+    return {};
+}
+
 bool MeshManager::set(MeshId id, Uploader& uploader, const Mesh& mesh) {
-    if (auto sub_buffers = this->meshes.get(get_slot_key(id)); sub_buffers != nullptr) {
-        if (auto new_sub_buffers = this->create_sub_buffers(uploader, mesh); 
+    if (auto data = this->meshes.get(get_slot_key(id)); data != nullptr) {
+        if (auto new_sub_buffers = this->create_data(uploader, mesh); 
             new_sub_buffers.has_value()) 
         {
-            this->vertex_heap.deferred_free(sub_buffers->vertices);
-            this->index_heap.deferred_free(sub_buffers->indices);
-            *sub_buffers = new_sub_buffers.value();
+            this->vertex_heap.deferred_free(data->vertices);
+            this->index_heap.deferred_free(data->indices);
+            *data = new_sub_buffers.value();
             return true;
         }
         return false;
@@ -97,7 +104,7 @@ bool MeshManager::set(MeshId id, Uploader& uploader, const Mesh& mesh) {
 
 bool MeshManager::free(MeshId id) {
     SlotKey key = get_slot_key(id);
-    return this->meshes.free(key, [&](MeshSubBuffers& sub_buffers) {
+    return this->meshes.free(key, [&](MeshData& sub_buffers) {
         this->vertex_heap.deferred_free(sub_buffers.vertices);
         this->index_heap.deferred_free(sub_buffers.indices);
     });
@@ -139,23 +146,27 @@ static std::optional<std::vector<VertexData>> interlace_mesh_attributes(const Me
     return vertices;
 }
 
-std::optional<MeshManager::MeshSubBuffers> MeshManager::create_sub_buffers(
+std::optional<MeshManager::MeshData> MeshManager::create_data(
     Uploader& uploader, 
     const Mesh& mesh
 ) {
-    auto vertices = interlace_mesh_attributes(mesh);
+    const auto vertices = interlace_mesh_attributes(mesh);
     const auto& indices = mesh.indices;
 
     if (!vertices.has_value()) {
         return std::nullopt;
     }
 
-    auto vertices_buffer = this->vertex_heap.allocate<VertexData>(vertices.value().size());
+    const Aabb bounds = mesh.aabb.has_value() ?
+        mesh.aabb.value() :
+        Aabb(mesh.positions);
+
+    const auto vertices_buffer = this->vertex_heap.allocate<VertexData>(vertices.value().size());
     if (!vertices_buffer.has_value()) {
         return std::nullopt;
     }
 
-    auto indices_buffer = this->index_heap.allocate<uint32_t>(indices.size());
+    const auto indices_buffer = this->index_heap.allocate<uint32_t>(indices.size());
     if (!indices_buffer.has_value()) {
         return std::nullopt;
     }
@@ -177,8 +188,9 @@ std::optional<MeshManager::MeshSubBuffers> MeshManager::create_sub_buffers(
             .set_usage_stage(vk::PipelineStageFlagBits2::eIndexInput)
     );
 
-    return MeshSubBuffers{
+    return MeshData{
         .vertices = vertices_buffer.value(),
-        .indices = indices_buffer.value()
+        .indices = indices_buffer.value(),
+        .bounds = bounds
     };
 }

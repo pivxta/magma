@@ -243,12 +243,14 @@ static bool create_device_and_queue(DeviceContext& device) {
     auto vma_vk_functions = vma::VulkanFunctions()
         .setVkGetInstanceProcAddr(vkGetInstanceProcAddr)
         .setVkGetDeviceProcAddr(vkGetDeviceProcAddr);
+
     auto vma_info = vma::AllocatorCreateInfo()
         .setFlags(vma::AllocatorCreateFlagBits::eBufferDeviceAddress)
         .setInstance(device.instance->instance)
         .setDevice(device.logical)
         .setPhysicalDevice(device.physical)
         .setPVulkanFunctions(&vma_vk_functions);
+
     auto [alloc_result, allocator] = vma::createAllocator(vma_info);
     if (alloc_result != vk::Result::eSuccess) {
         spdlog::error("Failed to create allocator");

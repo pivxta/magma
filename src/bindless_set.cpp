@@ -1,11 +1,14 @@
 #include "bindless_set.h"
 #include "vk_error.h"
 
+static constexpr uint32_t NORMAL_SAMPLER_COUNT = static_cast<uint32_t>(Sampler::Count);
+static constexpr uint32_t CMP_SAMPLER_COUNT = static_cast<uint32_t>(ComparisonSampler::Count);
+
 static vk::DescriptorPool create_descriptor_pool(vk::Device device, uint32_t max_textures) {
     std::array pool_sizes = {
         vk::DescriptorPoolSize()
             .setType(vk::DescriptorType::eSampler)
-            .setDescriptorCount(static_cast<uint32_t>(Sampler::Count)),
+            .setDescriptorCount(NORMAL_SAMPLER_COUNT + CMP_SAMPLER_COUNT),
         vk::DescriptorPoolSize()
             .setType(vk::DescriptorType::eSampledImage)
             .setDescriptorCount(max_textures),
@@ -30,14 +33,20 @@ static vk::DescriptorSetLayout create_set_layout(vk::Device device, uint32_t max
         vk::DescriptorSetLayoutBinding()
             .setBinding(1)
             .setDescriptorType(vk::DescriptorType::eSampler)
-            .setDescriptorCount(static_cast<uint32_t>(Sampler::Count))
+            .setDescriptorCount(NORMAL_SAMPLER_COUNT)
+            .setStageFlags(vk::ShaderStageFlagBits::eFragment),
+        vk::DescriptorSetLayoutBinding()
+            .setBinding(2)
+            .setDescriptorType(vk::DescriptorType::eSampler)
+            .setDescriptorCount(CMP_SAMPLER_COUNT)
             .setStageFlags(vk::ShaderStageFlagBits::eFragment),
     };
 
-    std::array<vk::DescriptorBindingFlags, 2> binding_flags = {
+    std::array<vk::DescriptorBindingFlags, 3> binding_flags = {
         vk::DescriptorBindingFlagBits::eUpdateAfterBind
             | vk::DescriptorBindingFlagBits::ePartiallyBound,
         vk::DescriptorBindingFlagBits::ePartiallyBound, 
+        vk::DescriptorBindingFlagBits::ePartiallyBound
     };
 
     auto [result1, layout] = device.createDescriptorSetLayout(
@@ -71,7 +80,7 @@ BindlessSet::BindlessSet(
     DeviceHandle device, 
     uint32_t frames_in_flight,
     uint32_t max_textures,
-    const GlobalSamplerInfo& sampler_info
+    const TextureSamplerInfo& sampler_info
 ):
     textures(max_textures)
 {
@@ -114,7 +123,7 @@ void BindlessSet::update_pending() {
     }
 }
 
-std::optional<SlotKey<Texture>> BindlessSet::add_texture(
+std::optional<BindlessKey> BindlessSet::add_texture(
     const std::function<Texture(const DeviceHandle&)>& create
 ) {
     if (auto key = this->textures.reserve(); key.has_value()) {
@@ -137,14 +146,14 @@ std::optional<SlotKey<Texture>> BindlessSet::add_texture(
     return std::nullopt;
 }
 
-void BindlessSet::free_texture(SlotKey<Texture> key) {
+void BindlessSet::free_texture(BindlessKey key) {
     this->destroy_queue.push_front(PendingDestroy{
         .request_frame = this->frame_counter,
         .texture = key
     });
 }
 
-const Texture* BindlessSet::get_texture(SlotKey<Texture> key) const {
+const Texture* BindlessSet::get_texture(BindlessKey key) const {
     return this->textures.get(key);
 }
 
@@ -152,12 +161,20 @@ static uint32_t get_sampler_index(Sampler sampler) {
     return static_cast<uint32_t>(sampler);
 }
 
-void BindlessSet::configure_samplers(const GlobalSamplerInfo& info) {
+static uint32_t get_sampler_index(ComparisonSampler sampler) {
+    return static_cast<uint32_t>(sampler);
+}
+
+void BindlessSet::configure_samplers(const TextureSamplerInfo& info) {
     this->sampler_info = info;
     this->should_reconfigure_samplers = true;
 }
 
 uint32_t BindlessSet::get_sampler(Sampler sampler) const {
+    return get_sampler_index(sampler);
+}
+
+uint32_t BindlessSet::get_sampler(ComparisonSampler sampler) const {
     return get_sampler_index(sampler);
 }
 
@@ -170,6 +187,15 @@ static vk::SamplerAddressMode get_address_mode(Sampler sampler) {
         case Sampler::NearestMirrored: return vk::SamplerAddressMode::eMirroredRepeat;
         case Sampler::NearestClamp: return vk::SamplerAddressMode::eClampToEdge;
         default: return vk::SamplerAddressMode::eRepeat;
+    }
+}
+
+static vk::Filter get_filter(ComparisonSampler sampler) {
+    switch (sampler) {
+        case ComparisonSampler::Nearest: return vk::Filter::eNearest;
+        case ComparisonSampler::Linear:
+        default:
+            return vk::Filter::eLinear;
     }
 }
 
@@ -207,7 +233,7 @@ static vk::SamplerMipmapMode get_mip_map_filter(Filter filter) {
 
 static vk::Sampler create_sampler(
     const DeviceHandle& device, 
-    const GlobalSamplerInfo& info, 
+    const TextureSamplerInfo& info, 
     Sampler type
 ) {
     vk::SamplerAddressMode address_mode = get_address_mode(type);
@@ -220,10 +246,26 @@ static vk::Sampler create_sampler(
         .setMinFilter(get_filter(info.minify_filter))
         .setMipmapMode(get_mip_map_filter(info.mip_map_filter))
         .setMaxAnisotropy(info.max_anisotropy)
-        .setAnisotropyEnable(
-            info.minify_filter == Filter::Linear 
-            && info.max_anisotropy > 1
-        )
+        .setAnisotropyEnable(info.minify_filter == Filter::Linear && info.max_anisotropy > 1)
+        .setMinLod(0.0f)
+        .setMaxLod(128.0f);
+
+    auto [result, sampler] = device->logical.createSampler(sampler_info);
+    vk_expect(result, "Failed to create sampler");
+    return sampler;
+}
+
+static vk::Sampler create_sampler(const DeviceHandle& device, ComparisonSampler type) {
+    vk::Filter filter = get_filter(type);
+    auto sampler_info = vk::SamplerCreateInfo()
+        .setMagFilter(filter)
+        .setMinFilter(vk::Filter::eNearest)
+        .setMipmapMode(vk::SamplerMipmapMode::eNearest)
+        .setAddressModeU(vk::SamplerAddressMode::eClampToEdge)
+        .setAddressModeV(vk::SamplerAddressMode::eClampToEdge)
+        .setAddressModeW(vk::SamplerAddressMode::eClampToEdge)
+        .setCompareEnable(true)
+        .setCompareOp(vk::CompareOp::eGreaterOrEqual)
         .setMinLod(0.0f)
         .setMaxLod(128.0f);
 
@@ -233,7 +275,7 @@ static vk::Sampler create_sampler(
 }
 
 void BindlessSet::create_samplers() {
-    std::array types = {
+    std::array normal_types = {
         Sampler::NearestRepeat,
         Sampler::NearestMirrored,
         Sampler::NearestClamp,
@@ -241,24 +283,27 @@ void BindlessSet::create_samplers() {
         Sampler::LinearMirrored,
         Sampler::LinearClamp
     };
-    for (auto type: types) {
+    std::array cmp_types = {
+        ComparisonSampler::Linear,
+        ComparisonSampler::Nearest,
+    };
+    for (auto type: normal_types) {
         this->samplers[get_sampler_index(type)] = 
             create_sampler(this->device, this->sampler_info, type);
     }
-    this->bind_samplers(this->desc_set, types);
+    for (auto type: cmp_types) {
+        this->cmp_samplers[get_sampler_index(type)] = create_sampler(this->device, type);
+    }
+    this->bind_samplers(this->desc_set);
 }
 
-void BindlessSet::bind_samplers(
-    vk::DescriptorSet set,
-    std::span<Sampler> types
-) {
+void BindlessSet::bind_samplers(vk::DescriptorSet set) {
     std::vector<vk::DescriptorImageInfo> infos;
-    infos.reserve(types.size());
+    infos.reserve(NORMAL_SAMPLER_COUNT + CMP_SAMPLER_COUNT);
     std::vector<vk::WriteDescriptorSet> writes;
-    writes.reserve(types.size());
+    writes.reserve(NORMAL_SAMPLER_COUNT + CMP_SAMPLER_COUNT);
 
-    for (auto type: types) {
-        uint32_t index = get_sampler_index(type);
+    for (uint32_t index = 0; index < NORMAL_SAMPLER_COUNT; index++) {
         vk::Sampler sampler = this->samplers[index];
         if (sampler == vk::Sampler()) {
             continue;
@@ -274,6 +319,24 @@ void BindlessSet::bind_samplers(
                 .setImageInfo(infos.back())
         );
     }
+
+    for (uint32_t index = 0; index < CMP_SAMPLER_COUNT; index++) {
+        vk::Sampler sampler = this->cmp_samplers[index];
+        if (sampler == vk::Sampler()) {
+            continue;
+        }
+
+        infos.push_back(vk::DescriptorImageInfo().setSampler(sampler));
+        writes.push_back(
+            vk::WriteDescriptorSet()
+                .setDstSet(set)
+                .setDstBinding(2)
+                .setDstArrayElement(index)
+                .setDescriptorType(vk::DescriptorType::eSampler)
+                .setImageInfo(infos.back())
+        );
+    }
+
     this->device->logical.updateDescriptorSets(writes, {});
 }
 
@@ -283,9 +346,14 @@ void BindlessSet::destroy_samplers() {
             this->device->logical.destroySampler(sampler);
         }
     }
+    for (auto sampler: this->cmp_samplers) {
+        if (sampler != vk::Sampler()) {
+            this->device->logical.destroySampler(sampler);
+        }
+    }
 }
 
-void BindlessSet::destroy_texture(SlotKey<Texture> key) {
+void BindlessSet::destroy_texture(BindlessKey key) {
     this->textures.free(key, [&](Texture& texture) {
         texture.destroy(this->device);
         texture = Texture{};

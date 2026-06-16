@@ -20,15 +20,19 @@ public:
 
     void resize();
 
+    [[nodiscard]]
     TextureId add_texture(const Image& image); 
     void set_texture(TextureId id, const Image& image); 
     void free_texture(TextureId id); 
 
+    [[nodiscard]]
     MaterialId add_material(const Material& material);
-    const Material* get_material(MaterialId id);
+    [[nodiscard]]
+    const Material* get_material(MaterialId id) const;
     void set_material(MaterialId id, const Material& material);
     void free_material(MaterialId id);
 
+    [[nodiscard]]
     MeshId add_mesh(const Mesh& mesh);
     void set_mesh(MeshId id, const Mesh& mesh);
     void free_mesh(MeshId id);

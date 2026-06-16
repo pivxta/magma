@@ -3,7 +3,8 @@ Checks: >
   performance-*,
   modernize-*,
   -modernize-use-trailing-return-type,
-  -modernize-use-nodiscard
+  -modernize-use-nodiscard,
+  -bugprone-unchecked-optional-access
 CheckOptions:
   bugprone-easily-swappable-parameters.MinimumLength: '3'
 HeaderFilterRegex: '^.*/src/.*$'

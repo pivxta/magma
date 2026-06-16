@@ -27,25 +27,35 @@ RenderTargetId RenderTargetManager::get_target_id(SlotKey<Target> key) {
     };
 }
 
+size_t RenderTargetManager::get_state_count(const Target& target) const {
+    if (target.buffering == RenderTargetBuffering::PerFif && !target.owned) {
+        return static_cast<size_t>(this->frames_in_flight) 
+            * target.array_layers 
+            * target.mip_levels;
+    } else {
+        return static_cast<size_t>(target.array_layers) * target.mip_levels;
+    }
+}
+
+size_t RenderTargetManager::get_texture_count(const RenderTargetInfo& info) const {
+    if (info.buffering == RenderTargetBuffering::PerFif) { 
+        return this->frames_in_flight;
+    } else {
+        return 1;
+    }
+}
+
 size_t RenderTargetManager::get_state_index(
     const Target& target, 
     uint32_t array_layer, 
     uint32_t mip_level
-) {
-    if (target.buffering == RenderTargetBuffering::PerFif && target.owned) {
+) const {
+    if (target.buffering == RenderTargetBuffering::PerFif && !target.owned) {
         return this->frame_index * target.array_layers * target.mip_levels
             + array_layer * target.mip_levels
             + mip_level;
     } else {
         return array_layer * target.mip_levels + mip_level;
-    }
-}
-
-static uint32_t get_texture_count(RenderTargetBuffering buffering, uint32_t frames_in_flight) {
-    if (buffering == RenderTargetBuffering::PerFif) { 
-        return frames_in_flight;
-    } else {
-        return 1;
     }
 }
 
@@ -56,42 +66,25 @@ std::optional<RenderTargetId> RenderTargetManager::reserve() {
     return std::nullopt;
 }
 
-bool RenderTargetManager::bind(
-    RenderTargetId id, 
-    const Texture& texture, 
-    RenderTargetSubresourceState state
-) {
-    assert(texture.mip_levels() == 1 && texture.array_layers() == 1);
+void RenderTargetManager::bind(RenderTargetId id, const Texture& texture) {
     if (auto target = this->targets.get(get_slot_key(id)); target != nullptr) {
-        if (target->owned) {
-            return false;
-        }
-        target->textures.resize(1);
-        target->textures[0] = &texture;
-        target->states.resize(1);
-        target->states[0] = state;
+        assert(!target->owned && "Cannot bind texture to owned target.");
+        target->bound = &texture;
         target->mip_levels = texture.mip_levels();
         target->array_layers = texture.array_layers();
-        return true;
+        target->states.clear();
+        target->states.resize(this->get_state_count(*target), {});
     }
-    return false;
 }
 
 std::optional<RenderTargetId> RenderTargetManager::add(const RenderTargetInfo& info) {
     if (auto key = this->targets.reserve(); key.has_value()) {
-        Target target{
-            .buffering = info.buffering,
-            .size_policy = info.size_policy,
-            .mip_levels = info.mip_levels,
-            .array_layers = info.array_layers,
-            .owned = true,
-        };
-        if (!this->create_textures(target, info)) {
-            this->targets.free(key.value(), [](auto&){});
-            return std::nullopt;
+        if (auto target = this->create_target(info); target.has_value()) {
+            *this->targets.get(key.value()) = target.value();
+            return get_target_id(key.value());
         }
-        *this->targets.get(key.value()) = target;
-        return get_target_id(key.value());
+        this->targets.free(key.value(), [](auto&){});
+        return std::nullopt;
     }
     return std::nullopt;
 }
@@ -99,17 +92,30 @@ std::optional<RenderTargetId> RenderTargetManager::add(const RenderTargetInfo& i
 std::optional<RenderTargetIndices> RenderTargetManager::get_indices(
     RenderTargetId id,
     Sampler sampler
-) {
+) const {
     if (auto target = this->targets.get(get_slot_key(id)); target != nullptr) {
         return RenderTargetIndices{
-            .texture = target->keys[this->frame_index].index,
+            .texture = this->get_current_bindless_index(*target),
             .sampler = this->bindless_set.get_sampler(sampler)
         };
     }
     return std::nullopt;
 }
 
-const Texture* RenderTargetManager::get(RenderTargetId id) {
+std::optional<RenderTargetIndices> RenderTargetManager::get_indices(
+    RenderTargetId id,
+    ComparisonSampler sampler
+) const {
+    if (auto target = this->targets.get(get_slot_key(id)); target != nullptr) {
+        return RenderTargetIndices{
+            .texture = this->get_current_bindless_index(*target),
+            .sampler = this->bindless_set.get_sampler(sampler)
+        };
+    }
+    return std::nullopt;
+}
+
+const Texture* RenderTargetManager::get_texture(RenderTargetId id) const {
     if (auto target = this->targets.get(get_slot_key(id)); target != nullptr) {
         return this->get_target_texture(*target);
     }
@@ -122,7 +128,6 @@ void RenderTargetManager::free(RenderTargetId id) {
             this->bindless_set.free_texture(key);
         }
         target.keys = {};
-        target.textures = {};
         target.states = {};
     });
 }
@@ -131,7 +136,7 @@ RenderTargetSubresourceState RenderTargetManager::state(
     RenderTargetId id, 
     uint32_t array_layer,
     uint32_t mip_level
-) {
+) const {
     if (auto target = this->targets.get(get_slot_key(id)); target != nullptr) {
         return target->states[this->get_state_index(*target, array_layer, mip_level)];
     }
@@ -159,23 +164,18 @@ void RenderTargetManager::use(
     RenderTargetId id,
     std::span<const RenderTargetUsage> usages
 ) {
+    constexpr size_t MAX_BARRIERS = 128; 
     if (auto target = this->targets.get(get_slot_key(id)); target != nullptr) {
-        constexpr size_t MAX_BARRIERS = 128; 
-
-        auto texture = this->get_target_texture(*target);
-        auto aspect = get_default_aspect_flags(texture->format());
         size_t barrier_count = 0;
+        auto texture = this->get_target_texture(*target);
+        auto aspect = texture->used_aspects();
         std::array<vk::ImageMemoryBarrier2, MAX_BARRIERS> barriers;
         for (const auto& usage: usages) {
             for (uint32_t layer_offset = 0; layer_offset < usage.array_layer_count; layer_offset++) {
                 for (uint32_t mip_offset = 0; mip_offset < usage.mip_level_count; mip_offset++) {
-                    uint32_t array_layer = usage.base_array_layer + layer_offset;
-                    uint32_t mip_level = usage.base_mip_level + mip_offset;
-                    auto& state = target->states[this->get_state_index(
-                        *target, 
-                        array_layer, 
-                        mip_level
-                    )];
+                    uint32_t layer = usage.base_array_layer + layer_offset;
+                    uint32_t level = usage.base_mip_level + mip_offset;
+                    auto& state = target->states[this->get_state_index(*target, layer, level)];
 
                     RenderTargetSubresourceState src_state = usage.discard ?
                         RenderTargetSubresourceState{} :
@@ -193,9 +193,9 @@ void RenderTargetManager::use(
                         .setSubresourceRange(
                             vk::ImageSubresourceRange()
                                 .setAspectMask(aspect)
-                                .setBaseArrayLayer(array_layer)
+                                .setBaseArrayLayer(layer)
                                 .setLayerCount(1)
-                                .setBaseMipLevel(mip_level)
+                                .setBaseMipLevel(level)
                                 .setLevelCount(1)
                         );
 
@@ -209,7 +209,7 @@ void RenderTargetManager::use(
             command_buffer.pipelineBarrier2(
                 vk::DependencyInfo()
                     .setPImageMemoryBarriers(barriers.data())
-                    .setImageMemoryBarrierCount(barrier_count)
+                    .setImageMemoryBarrierCount(static_cast<uint32_t>(barrier_count))
             );
         }
     }
@@ -219,7 +219,7 @@ void RenderTargetManager::resize_swapchain(vk::Extent2D swapchain_extent) {
     this->swapchain_extent = swapchain_extent;
     this->targets.for_each([&](SlotKey<Target>, Target& target) {
         if (target.owned) {
-            this->recreate_textures(target);
+            this->recreate_target(target);
         }
     });
 }
@@ -246,7 +246,7 @@ static vk::Extent3D get_extent(const SizePolicy& policy, vk::Extent2D swapchain_
 
 vk::ImageUsageFlags get_required_usage(vk::Format format) {
     vk::ImageAspectFlags aspect = get_default_aspect_flags(format);
-    vk::ImageUsageFlags usage;
+    vk::ImageUsageFlags usage = vk::ImageUsageFlagBits::eSampled;
     if (aspect & (vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil)) {
         usage |= vk::ImageUsageFlagBits::eDepthStencilAttachment;
     } else if (aspect & (vk::ImageAspectFlagBits::eColor)) {
@@ -255,11 +255,13 @@ vk::ImageUsageFlags get_required_usage(vk::Format format) {
     return usage;
 }
 
-bool RenderTargetManager::create_textures(Target& target, const RenderTargetInfo& info) {
-    target.keys.clear();
-    target.textures.clear();
+bool RenderTargetManager::initialize_target(Target& target, const RenderTargetInfo& info) {
+    for (auto texture_key: target.keys) {
+        this->bindless_set.free_texture(texture_key);
+    }
 
-    uint32_t texture_count = get_texture_count(info.buffering, this->frames_in_flight);
+    target.keys.clear();
+    size_t texture_count = this->get_texture_count(info);
     for (uint32_t i = 0; i < texture_count; i++) {
         auto key = this->bindless_set.add_texture([&](const DeviceHandle& device) {
             return Texture(
@@ -280,49 +282,70 @@ bool RenderTargetManager::create_textures(Target& target, const RenderTargetInfo
 
         if (key.has_value()) {
             target.keys.push_back(key.value());
-            target.textures.push_back(this->bindless_set.get_texture(key.value()));
         } else {
             for (auto created_key: target.keys) {
                 this->bindless_set.free_texture(created_key);
             }
             target.keys.clear();
-            target.textures.clear();
             return false;
         }
     }
+
+    target.owned = true;
+    target.array_layers = info.array_layers;
+    target.mip_levels = info.mip_levels;
+    target.buffering = info.buffering;
+    target.size_policy = info.size_policy;
     target.states.clear();
-    target.states.resize(
-        static_cast<size_t>(this->frames_in_flight)
-            * static_cast<size_t>(target.array_layers) 
-            * static_cast<size_t>(target.mip_levels),
-        RenderTargetSubresourceState{}
-    );
+    target.states.resize(this->get_state_count(target), {});
     return true;
 }
 
-bool RenderTargetManager::recreate_textures(Target& target) {
-    assert(target.textures.size() >= 1);
-
-    const auto info = RenderTargetInfo()
-        .set_buffering(target.buffering)
-        .set_size_policy(target.size_policy.value())
-        .set_array_layers(target.array_layers)
-        .set_mip_levels(target.mip_levels)
-        .set_format(target.textures[0]->format())
-        .set_samples(target.textures[0]->samples())
-        .set_usage(target.textures[0]->usage());
-
-    for (auto texture_key: target.keys) {
-        this->bindless_set.free_texture(texture_key);
+std::optional<RenderTargetManager::Target> RenderTargetManager::create_target(
+    const RenderTargetInfo& info
+) {
+    Target target;
+    if (this->initialize_target(target, info)) {
+        return target;
     }
-
-    return this->create_textures(target, info);
+    return std::nullopt;
 }
 
-const Texture* RenderTargetManager::get_target_texture(const Target& target) {
+bool RenderTargetManager::recreate_target(Target& target) {
+    assert(target.keys.size() >= 1);
+    const Texture* texture = this->get_target_texture(target);
+    return this->initialize_target(
+        target,
+        RenderTargetInfo()
+            .set_buffering(target.buffering)
+            .set_size_policy(target.size_policy.value())
+            .set_array_layers(target.array_layers)
+            .set_mip_levels(target.mip_levels)
+            .set_format(texture->format())
+            .set_samples(texture->samples())
+            .set_usage(texture->usage())
+    );
+}
+
+const Texture* RenderTargetManager::get_target_texture(const Target& target) const {
+    if (!target.owned) {
+        return target.bound;
+    }
+
     if (target.buffering == RenderTargetBuffering::PerFif) {
-        return target.textures[this->frame_index];
+        return this->bindless_set.get_texture(target.keys[this->frame_index]);
     } else {
-        return target.textures[0];
+        return this->bindless_set.get_texture(target.keys[0]);
+    }
+}
+
+
+uint32_t RenderTargetManager::get_current_bindless_index(const Target& target) const {
+    assert(target.owned);
+    
+    if (target.buffering == RenderTargetBuffering::PerFif) {
+        return target.keys[this->frame_index].index;
+    } else {
+        return target.keys[0].index;
     }
 }

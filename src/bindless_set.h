@@ -4,6 +4,8 @@
 #include "texture_filtering.h"
 #include "slot_map.h"
 
+using BindlessKey = SlotKey<Texture>;
+
 class BindlessSet {
 public:
     BindlessSet() = default;
@@ -12,7 +14,7 @@ public:
         DeviceHandle device, 
         uint32_t frames_in_flight,
         uint32_t texture_descriptor_count,
-        const GlobalSamplerInfo& sampler_info = {}
+        const TextureSamplerInfo& sampler_info = {}
     );
 
     BindlessSet(const BindlessSet&) = delete;
@@ -23,14 +25,13 @@ public:
     ~BindlessSet();
 
     void update_pending();
+    void configure_samplers(const TextureSamplerInfo& info);
 
-    std::optional<SlotKey<Texture>> add_texture(
-        const std::function<Texture(const DeviceHandle&)>& create
-    );
-    const Texture* get_texture(SlotKey<Texture> key) const;
-    void free_texture(SlotKey<Texture> key);
-    void configure_samplers(const GlobalSamplerInfo& info);
+    std::optional<BindlessKey> add_texture(const std::function<Texture(const DeviceHandle&)>& create);
+    const Texture* get_texture(BindlessKey key) const;
+    void free_texture(BindlessKey key);
     uint32_t get_sampler(Sampler sampler) const;
+    uint32_t get_sampler(ComparisonSampler sampler) const;
 
     uint32_t texture_capacity() const {
         return this->textures.capacity().value();
@@ -49,14 +50,14 @@ public:
     }
 
 private:
-    void destroy_texture(SlotKey<Texture> texture);
-    void bind_samplers(vk::DescriptorSet set, std::span<Sampler> types);
+    void destroy_texture(BindlessKey texture);
+    void bind_samplers(vk::DescriptorSet set);
     void create_samplers();
     void destroy_samplers();
 
     struct PendingDestroy {
         uint64_t request_frame;
-        SlotKey<Texture> texture;
+        BindlessKey texture;
     };
 
     DeviceHandle device;
@@ -65,10 +66,14 @@ private:
     vk::DescriptorSetLayout desc_set_layout;
     vk::DescriptorSet desc_set;
 
+    using Samplers = std::array<vk::Sampler, static_cast<size_t>(Sampler::Count)>;
+    using CmpSamplers = std::array<vk::Sampler, static_cast<size_t>(ComparisonSampler::Count)>;
+
     SlotMap<Texture> textures;
     std::deque<PendingDestroy> destroy_queue;
-    std::array<vk::Sampler, static_cast<size_t>(Sampler::Count)> samplers;
-    GlobalSamplerInfo sampler_info;
+    Samplers samplers;
+    CmpSamplers cmp_samplers;
+    TextureSamplerInfo sampler_info;
     bool should_reconfigure_samplers = false;
     uint32_t frames_in_flight;
     uint64_t frame_counter = 0;

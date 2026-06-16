@@ -8,7 +8,7 @@ TextureManager::TextureManager(
     Uploader& uploader,
     uint32_t frames_in_flight,
     uint32_t max_textures,
-    const GlobalSamplerInfo& sampler_info
+    const TextureSamplerInfo& sampler_info
 ):
     bindless_set(device, frames_in_flight, max_textures, sampler_info)
 {
@@ -134,7 +134,7 @@ static uint32_t get_mip_levels(uint32_t width, uint32_t height, std::optional<ui
     return levels.value_or(max_mip_levels);
 }
 
-std::optional<SlotKey<Texture>> TextureManager::create_texture(
+std::optional<BindlessKey> TextureManager::create_texture(
     Uploader& uploader,
     const Image& image
 ) {
@@ -155,12 +155,12 @@ std::optional<SlotKey<Texture>> TextureManager::create_texture(
                 .setSharingMode(vk::SharingMode::eExclusive)
                 .setTiling(vk::ImageTiling::eOptimal)
         );
-        this->mipmap_generator.generate(texture);
         uploader.upload_image(
             ImageUpload()
                 .set_texture(texture)
                 .set_image(image)
         );
+        this->mipmap_generator.generate(texture);
         return texture;
     });
 }

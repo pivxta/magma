@@ -30,6 +30,7 @@ struct ImageLoadInfo {
     }
 };
 
+[[nodiscard]]
 size_t get_format_pixel_size_bytes(ImageFormat format);
 
 struct Image {
@@ -86,6 +87,7 @@ struct Image {
         return *this;
     }
 
+    [[nodiscard]]
     size_t expected_size_bytes() const {
         return static_cast<size_t>(this->width) 
             * static_cast<size_t>(this->height)

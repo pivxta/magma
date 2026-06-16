@@ -36,11 +36,17 @@ public float3 calculate_radiance<B: Brdf, L: Light>(
         return float3(0.0);
     }
 
+    let shadow_factor = light.get_shadow_factor(sample.position);
+    if (shadow_factor < 0.001) {
+        return float3(0.0);
+    }
+
     let omega_i = light.get_omega_i(sample.position);
     let omega_o = normalize(view_position - sample.position);
     let shadow_mask = shadow_terminator_mask(omega_i, sample.normal, sample.geometry_normal);
     return brdf.calculate(sample, omega_i, omega_o)
             * light.get_incident_radiance(sample.position)
             * max(dot(omega_i, sample.normal), 0.0)
+            * shadow_factor
             * shadow_mask;
 }

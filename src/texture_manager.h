@@ -4,7 +4,6 @@
 #include <vulkan/vulkan.hpp>
 #include <vk_mem_alloc.hpp>
 #include "image.h"
-#include "texture.h"
 #include "slot_map.h"
 #include "resource.h"
 #include "texture_indices.h"
@@ -30,7 +29,7 @@ public:
         Uploader& uploader,
         uint32_t frames_in_flight,
         uint32_t max_textures,
-        const GlobalSamplerInfo& sampler_info = {}
+        const TextureSamplerInfo& sampler_info = {}
     );
 
     TextureManager(const TextureManager&) = delete;
@@ -44,20 +43,23 @@ public:
     TextureIndices get_fallback(TextureFallback fallback = TextureFallback::ColorError) const;
 
     TextureId reserve(TextureFallback fallback = TextureFallback::ColorError);
+
     TextureId add(
         Uploader& uploader,
         const Image& image,
         TextureFallback fallback = TextureFallback::ColorError
     );
+
     void set(
         TextureId id,
         Uploader& uploader,
         const Image& image,
         TextureFallback fallback = TextureFallback::ColorError
     );
+
     void free(TextureId id);
 
-    void configure_samplers(const GlobalSamplerInfo& info) {
+    void configure_samplers(const TextureSamplerInfo& info) {
         this->bindless_set.configure_samplers(info);
     }
 
@@ -86,13 +88,13 @@ public:
     }
     
 private:
-    std::optional<SlotKey<Texture>> create_texture(Uploader& uploader, const Image& image);
+    std::optional<BindlessKey> create_texture(Uploader& uploader, const Image& image);
     void create_fallbacks(Uploader& uploader);
 
     struct Slot {
         uint32_t sampler_index;
-        std::optional<SlotKey<Texture>> texture;
-        SlotKey<Texture> fallback;
+        std::optional<BindlessKey> texture;
+        BindlessKey fallback;
     };
 
     static TextureId get_texture_id(SlotKey<Slot> key);
@@ -100,7 +102,7 @@ private:
     static TextureIndices get_slot_indices(const Slot& slot);
     TextureIndices get_fallback_indices(TextureFallback fallback) const;
 
-    using Fallbacks = std::array<SlotKey<Texture>, static_cast<size_t>(TextureFallback::Count)>;
+    using Fallbacks = std::array<BindlessKey, static_cast<size_t>(TextureFallback::Count)>;
 
     BindlessSet bindless_set;
     MipmapGenerator mipmap_generator;

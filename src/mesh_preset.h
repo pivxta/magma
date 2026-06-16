@@ -20,6 +20,7 @@ struct Quad {
         this->size = size;
     }
 
+    [[nodiscard]]
     Mesh to_mesh();
 };
 
@@ -34,6 +35,7 @@ struct Cuboid {
         this->size = size;
     }
 
+    [[nodiscard]]
     Mesh to_mesh();
 };
 
@@ -68,6 +70,7 @@ struct Sphere {
         return *this;
     }
 
+    [[nodiscard]]
     Mesh to_mesh();
 };
 
@@ -103,6 +106,7 @@ struct Cylinder {
         return *this;
     }
 
+    [[nodiscard]]
     Mesh to_mesh();
 };
 

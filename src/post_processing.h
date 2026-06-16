@@ -28,10 +28,12 @@ struct AgxLook {
         return *this;
     }
 
+    [[nodiscard]]
     static AgxLook basic() {
         return {};
     }
     
+    [[nodiscard]]
     static AgxLook golden() {
         return AgxLook()
             .set_saturation(0.8f)
@@ -39,6 +41,7 @@ struct AgxLook {
             .set_slope(glm::vec3(1.0f, 0.9f, 0.5f));
     }
 
+    [[nodiscard]]
     static AgxLook punchy() {
         return AgxLook()
             .set_saturation(1.4f)

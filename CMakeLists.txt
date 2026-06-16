@@ -98,6 +98,7 @@ function(add_shaders TARGET)
                 ${include_flags}
                 -target spirv -profile spirv_1_5
                 -emit-spirv-directly -fvk-use-entrypoint-name
+                -warnings-disable 41012
                 -o "${out_spv}"
             DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${shader}" ${module_deps}
             COMMENT "Compiling Slang shader ${shader}"
@@ -181,6 +182,7 @@ add_executable(
     src/device.cpp
     src/bindless_set.h
     src/bindless_set.cpp
+    src/aabb.h
 )
 add_shaders(
     ${PROJECT_NAME}
@@ -189,6 +191,7 @@ add_shaders(
     SHADERS
         shaders/pbr_forward.slang
         shaders/tonemap.slang
+        shaders/shadow.slang
     MODULES
         shaders/consts.slang
         shaders/surface.slang
@@ -245,7 +248,7 @@ if(NOT TARGET stb)
 endif()
 
 set_target_properties(${PROJECT_NAME} PROPERTIES DEBUGGER_WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_20)
+target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_23)
 target_link_libraries(
     ${PROJECT_NAME} PRIVATE 
     Vulkan::Vulkan

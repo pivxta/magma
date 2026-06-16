@@ -27,6 +27,7 @@
 #include <glm/mat4x4.hpp>
 #include <glm/mat4x3.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <vulkan/vulkan.hpp>
 
 static constexpr uint32_t MAX_RENDER_TARGETS = 256;
@@ -97,6 +98,12 @@ struct DrawConstants {
     vk::DeviceAddress draws;
 };
 
+struct ShadowConstants {
+    glm::mat4 light_world_to_clip;
+    vk::DeviceAddress instances;
+    vk::DeviceAddress draws;
+};
+
 struct InstanceData {
     glm::mat4x3 local_to_world;
     uint32_t material_index;
@@ -117,12 +124,17 @@ struct PointLightData {
     float radius;
     alignas(16) glm::vec3 color;
     float intensity;
+    bool shadows_enabled;
+    RenderTargetIndices shadow_map;
 };
 
 struct DirectionalLightData {
     alignas(16) glm::vec3 direction;
     alignas(16) glm::vec3 color;
     float illuminance;
+    bool shadows_enabled;
+    glm::mat4 world_to_shadow_clip;
+    RenderTargetIndices shadow_map;
 };
 
 struct ViewData {
@@ -158,6 +170,8 @@ struct SceneDrawData {
     std::vector<ScratchData> scratch;
     std::vector<DrawData> draws;
     std::vector<vk::DrawIndexedIndirectCommand> draw_commands;
+
+    Aabb bounds;
 };
 
 struct FrameData {
@@ -190,11 +204,75 @@ static inline std::vector<uint32_t> read_spirv_file(const std::filesystem::path&
     }
 };
 
+static glm::mat4 directional_light_matrix(glm::vec3 light_direction, const Aabb& world_bounds) {
+    const auto dir = glm::normalize(light_direction);
+    const auto up = glm::abs(dir.y) > 0.99f ? 
+        glm::vec3(0.0f, 0.0f, 1.0f) : 
+        glm::vec3(0.0f, 1.0f, 0.0f);
+
+    glm::vec3 center = world_bounds.center();
+    glm::mat4 light_view = glm::lookAtRH(center, center + dir, up);
+
+    Aabb ls = light_view * world_bounds;
+    glm::mat4 light_proj = glm::orthoRH_ZO(
+        ls.min.x, ls.max.x,
+        ls.min.y, ls.max.y,
+        -ls.min.z, -ls.max.z
+    );
+    return light_proj * light_view;
+}
+
 struct Renderer::Inner {
     static constexpr uint32_t FRAMES_IN_FLIGHT = 2;
+    InstanceHandle instance;
+    DeviceHandle device;
+    Swapchain swapchain;
+    SwapchainConfigureInfo swapchain_info;
+    bool should_reconfigure_swapchain = false;
+
+    std::vector<vk::Fence> fences;              // One per frame in flight
+    std::vector<vk::Semaphore> image_available; // One per frame in flight
+
+    uint32_t frame_index = 0;
+    uint64_t frame_counter = 0;
+
+    vk::CommandPool command_pool;
+    std::vector<vk::CommandBuffer> command_buffers; // One per frame in flight
+
+    vk::Pipeline pipeline;
+    vk::PipelineLayout pipeline_layout;
+
+    vk::Pipeline tonemap_pipeline;
+    vk::PipelineLayout tonemap_pipeline_layout;
+
+    vk::Pipeline shadow_pipeline;
+    vk::PipelineLayout shadow_pipeline_layout;
+
+    RenderTargetId swapchain_target;
+    RenderTargetId hdr_target;
+    RenderTargetId depth_target;
+    RenderTargetId shadow_target;
+    vk::Extent2D shadow_resolution = vk::Extent2D(1024, 1024);
+
+    Uploader uploader;
+    FrameArenaBuffer frame_arena;
+    RenderTargetManager targets;
+    TextureManager textures;
+    MaterialManager materials;
+    MeshManager meshes;
+    SceneDrawData scene_data;
 
     ~Inner() {
-        this->destroy();
+        this->device->wait_idle();
+        this->device->logical.destroyPipeline(this->shadow_pipeline);
+        this->device->logical.destroyPipelineLayout(this->shadow_pipeline_layout);
+        this->device->logical.destroyPipeline(this->tonemap_pipeline);
+        this->device->logical.destroyPipelineLayout(this->tonemap_pipeline_layout);
+        this->device->logical.destroyPipeline(this->pipeline);
+        this->device->logical.destroyPipelineLayout(this->pipeline_layout);
+        this->device->logical.freeCommandBuffers(this->command_pool, this->command_buffers);
+        this->device->logical.destroyCommandPool(this->command_pool);
+        this->destroy_sync_primitives();
     }
 
     void initialize(const std::shared_ptr<Target>& target) {
@@ -221,23 +299,23 @@ struct Renderer::Inner {
             FRAMES_IN_FLIGHT,
             UPLOADER_CAPACITY_PER_FIF
         );
-        this->target_manager = RenderTargetManager(
+        this->targets = RenderTargetManager(
             this->device,
             FRAMES_IN_FLIGHT,
             MAX_RENDER_TARGETS
         );
-        this->texture_manager = TextureManager(
+        this->textures = TextureManager(
             this->device,
             this->uploader,
             FRAMES_IN_FLIGHT,
             MAX_TEXTURES
         );
-        this->material_manager = MaterialManager(
+        this->materials = MaterialManager(
             this->device,
             FRAMES_IN_FLIGHT,
             MAX_MATERIALS
         );
-        this->mesh_manager = MeshManager(
+        this->meshes = MeshManager(
             this->device,
             FRAMES_IN_FLIGHT,
             VERTEX_HEAP_CAPACITY,
@@ -254,135 +332,29 @@ struct Renderer::Inner {
         this->create_render_targets();
         this->create_pipeline();
         this->create_tonemap_pipeline();
-    }
-
-    void destroy() {
-        this->device->wait_idle();
-        this->device->logical.destroyPipeline(this->tonemap_pipeline);
-        this->device->logical.destroyPipelineLayout(this->tonemap_pipeline_layout);
-        this->device->logical.destroyPipeline(this->pipeline);
-        this->device->logical.destroyPipelineLayout(this->pipeline_layout);
-        this->device->logical.freeCommandBuffers(this->command_pool, this->command_buffers);
-        this->device->logical.destroyCommandPool(this->command_pool);
-        this->destroy_sync_primitives();
-    }
-
-    void resize() {
-        this->should_reconfigure_swapchain = true;
-    }
-
-    TextureId add_texture(const Image& image) {
-        return this->texture_manager.add(this->uploader, image);
-    }
-
-    void set_texture(TextureId id, const Image& image) {
-        this->texture_manager.set(id, this->uploader, image);
-    }
-
-    void free_texture(TextureId id) {
-        this->texture_manager.free(id);
-    }
-
-    MaterialId add_material(const Material& material) {
-        return this->material_manager.add(material);
-    }
-
-    const Material* get_material(MaterialId id) {
-        return this->material_manager.get(id);
-    }
-
-    void set_material(MaterialId id, const Material& material) {
-        this->material_manager.set(id, material);
-    }
-
-    void free_material(MaterialId id) {
-        this->material_manager.free(id);
-    }
-    
-    MeshId add_mesh(const Mesh& mesh) {
-        return this->mesh_manager.add(this->uploader, mesh);
-    }
-
-    void set_mesh(MeshId id, const Mesh& mesh) {
-        this->mesh_manager.set(id, this->uploader, mesh);
-    }
-
-    void free_mesh(MeshId id) {
-        this->mesh_manager.free(id);
-    }
-
-    void draw(const Scene& scene) {
-        vk::Fence fence = this->fences[this->frame_index];
-
-        vk_expect(
-            this->device->logical.waitForFences(
-                fence, true,
-                std::numeric_limits<uint64_t>::max()
-            ),
-            "Fence wait failed"
-        );
-
-        auto [result1, swapchain_texture] = this->swapchain.acquire_texture(
-            this->image_available[this->frame_index]
-        );
-
-        if (result1 == vk::Result::eErrorOutOfDateKHR) {
-            this->reconfigure_render_targets();
-            return;
-        } else if (result1 != vk::Result::eSuboptimalKHR) {
-            vk_expect(result1, "Critical swapchain image acquisition failure");
-        }
-
-        vk_expect(this->device->logical.resetFences(fence), "Fence reset failed");
-        this->mesh_manager.free_pending();
-        this->texture_manager.update_pending();
-        this->target_manager.destroy_pending();
-        this->material_manager.flag_dirty_materials(this->texture_manager);
-        this->material_manager.update_dirty(this->texture_manager, this->frame_index);
-        this->texture_manager.clear_updated();
-        this->target_manager.bind(this->swapchain_target, *swapchain_texture.texture);
-
-        vk::CommandBuffer command_buffer = this->begin_frame_commands();
-        this->uploader.flush(command_buffer);
-        this->texture_manager.flush_mip_maps(command_buffer);
-        this->record_frame_commands(command_buffer, swapchain_texture, scene);
-        this->submit_frame_commands(command_buffer, swapchain_texture);
-
-        vk::Result result2 = this->swapchain.present(swapchain_texture);
-        if (result2 == vk::Result::eSuboptimalKHR 
-            || result2 == vk::Result::eErrorOutOfDateKHR 
-            || this->should_reconfigure_swapchain) 
-        {
-            this->reconfigure_render_targets();
-        }
-
-        this->frame_counter += 1;
-        this->frame_index = this->frame_counter % FRAMES_IN_FLIGHT;
-
-        this->uploader.begin_frame(this->frame_index);
-        this->frame_arena.begin_frame(this->frame_index);
-        this->texture_manager.begin_frame(this->frame_counter);
-        this->mesh_manager.begin_frame(this->frame_counter);
-        this->target_manager.begin_frame(this->frame_counter);
-    }
-
-private:
-    void create_render_targets() {
-        this->swapchain.configure(this->device, this->swapchain_info);
-        this->target_manager.resize_swapchain(this->swapchain.extent());
-        this->swapchain_target = this->target_manager.reserve().value();
-        this->depth_target = this->target_manager.add(
+        this->create_shadow_pipeline();
+        this->shadow_target = this->targets.add(
             RenderTargetInfo()
-                .set_buffering(RenderTargetBuffering::PerFif)
-                .set_size_policy(SwapchainAdjustedSizePolicy())
-                .set_usage(vk::ImageUsageFlagBits::eSampled)
+                .set_buffering(RenderTargetBuffering::Shared)
+                .set_size_policy(FixedSizePolicy(this->shadow_resolution))
                 .set_format(vk::Format::eD32Sfloat)
         ).value();
-        this->hdr_target = this->target_manager.add(
+    }
+
+    void create_render_targets() {
+        this->swapchain.configure(this->device, this->swapchain_info);
+        this->targets.resize_swapchain(this->swapchain.extent());
+        this->swapchain_target = this->targets.reserve().value();
+        this->depth_target = this->targets.add(
             RenderTargetInfo()
                 .set_buffering(RenderTargetBuffering::PerFif)
                 .set_size_policy(SwapchainAdjustedSizePolicy())
-                .set_usage(vk::ImageUsageFlagBits::eSampled)
+                .set_format(vk::Format::eD32Sfloat)
+        ).value();
+        this->hdr_target = this->targets.add(
+            RenderTargetInfo()
+                .set_buffering(RenderTargetBuffering::PerFif)
+                .set_size_policy(SwapchainAdjustedSizePolicy())
                 .set_format(vk::Format::eR16G16B16A16Sfloat)
         ).value();
     }
@@ -398,7 +370,7 @@ private:
             this->swapchain.configure(this->device, this->swapchain_info),
             "Failed to configure swapchain"
         );
-        this->target_manager.resize_swapchain(this->swapchain.extent());
+        this->targets.resize_swapchain(this->swapchain.extent());
     }
 
     void create_sync_primitives() {
@@ -471,7 +443,6 @@ private:
         auto raster_state = vk::PipelineRasterizationStateCreateInfo()
             .setPolygonMode(vk::PolygonMode::eFill)
             .setFrontFace(vk::FrontFace::eCounterClockwise)
-            .setCullMode(vk::CullModeFlagBits::eBack)
             .setLineWidth(1.0f);
 
         auto input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo()
@@ -507,8 +478,8 @@ private:
         auto dyn_state = vk::PipelineDynamicStateCreateInfo().setDynamicStates(dynamic_states);
 
         std::array set_layouts = {
-            this->texture_manager.descriptor_set_layout(),
-            this->target_manager.descriptor_set_layout()
+            this->textures.descriptor_set_layout(),
+            this->targets.descriptor_set_layout()
         };
         std::array push_constant_ranges = {
             vk::PushConstantRange()
@@ -548,6 +519,105 @@ private:
 
         this->tonemap_pipeline = pipeline;
         this->tonemap_pipeline_layout = pipeline_layout;
+    }
+
+    void create_shadow_pipeline() {
+        std::vector shader_spirv = read_spirv_file(SHADER_DIRECTORY / "shadow.spv");
+        auto [result1, shader_module] =
+            this->device->logical.createShaderModule(vk::ShaderModuleCreateInfo().setCode(shader_spirv));
+        vk_expect(result1, "Failed to create shader module");
+
+        std::array shader_stages = {
+            vk::PipelineShaderStageCreateInfo()
+                .setStage(vk::ShaderStageFlagBits::eVertex)
+                .setModule(shader_module)
+                .setPName("vertex_main")
+        };
+
+        auto vertex_state = vk::PipelineVertexInputStateCreateInfo();
+
+        auto raster_state = vk::PipelineRasterizationStateCreateInfo()
+            .setPolygonMode(vk::PolygonMode::eFill)
+            .setFrontFace(vk::FrontFace::eCounterClockwise)
+            .setCullMode(vk::CullModeFlagBits::eBack)
+            .setLineWidth(1.0f);
+
+        auto depth_state = vk::PipelineDepthStencilStateCreateInfo()
+            .setDepthTestEnable(true)
+            .setDepthWriteEnable(true)
+            .setDepthCompareOp(vk::CompareOp::eGreaterOrEqual);
+
+        auto input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo()
+            .setTopology(vk::PrimitiveTopology::eTriangleList);
+
+        vk::SampleMask sample_mask = ~static_cast<vk::SampleMask>(0);
+        auto ms_state = vk::PipelineMultisampleStateCreateInfo()
+            .setRasterizationSamples(vk::SampleCountFlagBits::e1)
+            .setPSampleMask(&sample_mask)
+            .setAlphaToCoverageEnable(false)
+            .setAlphaToOneEnable(false);
+
+        auto viewport_state = vk::PipelineViewportStateCreateInfo()
+            .setScissorCount(1)
+            .setViewportCount(1);
+
+        auto blend_attachment = vk::PipelineColorBlendAttachmentState()
+            .setBlendEnable(false)
+            .setColorWriteMask(
+                vk::ColorComponentFlagBits::eR 
+                    | vk::ColorComponentFlagBits::eG 
+                    | vk::ColorComponentFlagBits::eB 
+                    | vk::ColorComponentFlagBits::eA
+            );
+
+        auto blend_state = vk::PipelineColorBlendStateCreateInfo()
+            .setAttachments(blend_attachment);
+
+        std::array dynamic_states = {
+            vk::DynamicState::eViewport,
+            vk::DynamicState::eScissor,
+        };
+        auto dyn_state = vk::PipelineDynamicStateCreateInfo().setDynamicStates(dynamic_states);
+
+        std::array set_layouts = {this->textures.descriptor_set_layout()};
+        std::array push_constant_ranges = {
+            vk::PushConstantRange()
+                .setOffset(0)
+                .setSize(sizeof(ShadowConstants))
+                .setStageFlags(vk::ShaderStageFlagBits::eVertex)
+        };
+        auto [result2, pipeline_layout] = this->device->logical.createPipelineLayout(
+            vk::PipelineLayoutCreateInfo()
+                .setSetLayouts(set_layouts)
+                .setPushConstantRanges(push_constant_ranges)
+        );
+        vk_expect(result2, "Failed to create pipeline layout");
+
+        auto [result3, pipeline] = this->device->logical.createGraphicsPipeline(
+            vk::PipelineCache(),
+            vk::StructureChain{
+                vk::GraphicsPipelineCreateInfo()
+                    .setLayout(pipeline_layout)
+                    .setStages(shader_stages)
+                    .setPVertexInputState(&vertex_state)
+                    .setPInputAssemblyState(&input_assembly_state)
+                    .setPRasterizationState(&raster_state)
+                    .setPDepthStencilState(&depth_state)
+                    .setPMultisampleState(&ms_state)
+                    .setPViewportState(&viewport_state)
+                    .setPColorBlendState(&blend_state)
+                    .setPDynamicState(&dyn_state),
+
+                vk::PipelineRenderingCreateInfo()
+                    .setDepthAttachmentFormat(vk::Format::eD32Sfloat)
+            }
+            .get()
+        );
+        vk_expect(result3, "Failed to create graphics pipeline");
+        this->device->logical.destroyShaderModule(shader_module);
+
+        this->shadow_pipeline = pipeline;
+        this->shadow_pipeline_layout = pipeline_layout;
     }
 
     void create_pipeline() {
@@ -612,7 +682,10 @@ private:
         };
         auto dyn_state = vk::PipelineDynamicStateCreateInfo().setDynamicStates(dynamic_states);
 
-        std::array set_layouts = {this->texture_manager.descriptor_set_layout()};
+        std::array set_layouts = {
+            this->textures.descriptor_set_layout(),
+            this->targets.descriptor_set_layout()
+        };
         std::array push_constant_ranges = {
             vk::PushConstantRange()
                 .setOffset(0)
@@ -626,7 +699,7 @@ private:
         );
         vk_expect(result2, "Failed to create pipeline layout");
 
-        vk::Format color_format = this->target_manager.get(this->hdr_target)->format();
+        vk::Format color_format = this->targets.get_texture(this->hdr_target)->format();
         auto [result3, pipeline] = this->device->logical.createGraphicsPipeline(
             vk::PipelineCache(),
             vk::StructureChain{
@@ -655,6 +728,63 @@ private:
         this->pipeline_layout = pipeline_layout;
     }
 
+    void draw(const Scene& scene) {
+        this->update_scene_draw_data(scene);
+
+        vk::Fence fence = this->fences[this->frame_index];
+
+        vk_expect(
+            this->device->logical.waitForFences(
+                fence, true,
+                std::numeric_limits<uint64_t>::max()
+            ),
+            "Fence wait failed"
+        );
+
+        auto [result1, swapchain_texture] = this->swapchain.acquire_texture(
+            this->image_available[this->frame_index]
+        );
+
+        if (result1 == vk::Result::eErrorOutOfDateKHR) {
+            this->reconfigure_render_targets();
+            return;
+        } else if (result1 != vk::Result::eSuboptimalKHR) {
+            vk_expect(result1, "Critical swapchain image acquisition failure");
+        }
+
+        vk_expect(this->device->logical.resetFences(fence), "Fence reset failed");
+        this->meshes.free_pending();
+        this->textures.update_pending();
+        this->targets.destroy_pending();
+        this->materials.flag_dirty_materials(this->textures);
+        this->materials.update_dirty(this->textures, this->frame_index);
+        this->textures.clear_updated();
+        this->targets.bind(this->swapchain_target, *swapchain_texture.texture);
+
+        vk::CommandBuffer command_buffer = this->begin_frame_commands();
+        this->uploader.flush(command_buffer);
+        this->textures.flush_mip_maps(command_buffer);
+        this->record_frame_commands(command_buffer, swapchain_texture, scene);
+        this->submit_frame_commands(command_buffer, swapchain_texture);
+
+        vk::Result result2 = this->swapchain.present(swapchain_texture);
+        if (result2 == vk::Result::eSuboptimalKHR 
+            || result2 == vk::Result::eErrorOutOfDateKHR 
+            || this->should_reconfigure_swapchain) 
+        {
+            this->reconfigure_render_targets();
+        }
+
+        this->frame_counter += 1;
+        this->frame_index = this->frame_counter % FRAMES_IN_FLIGHT;
+
+        this->uploader.begin_frame(this->frame_index);
+        this->frame_arena.begin_frame(this->frame_index);
+        this->textures.begin_frame(this->frame_counter);
+        this->meshes.begin_frame(this->frame_counter);
+        this->targets.begin_frame(this->frame_counter);
+    }
+
     ViewData get_view_data(const Camera& camera) {
         vk::Extent2D viewport_size = this->swapchain.extent();
         auto viewport_width = static_cast<float>(viewport_size.width);
@@ -674,6 +804,16 @@ private:
             .illuminance = scene.ambient_light.illuminance
         };
 
+        this->scene_data.bounds = Aabb();
+        for (const auto& object: scene.mesh_objects) {
+            if (!this->meshes.is_valid(object.mesh)) {
+                continue;
+            }
+            this->scene_data.bounds.merge(
+                object.transform.affine_matrix() * this->meshes.get_bounds(object.mesh)
+            );
+        }
+
         this->scene_data.point_lights.clear();
         for (const auto& light: scene.point_lights) {
             this->scene_data.point_lights.push_back({
@@ -685,18 +825,27 @@ private:
         }
 
         this->scene_data.dir_lights.clear();
+        uint32_t dir_light_id = 0;
         for (const auto& light: scene.directional_lights) {
             this->scene_data.dir_lights.push_back({ 
                 .direction = light.direction,
                 .color = light.color,
-                .illuminance = light.illuminance
+                .illuminance = light.illuminance,
+                .shadows_enabled = dir_light_id == 0,
+                .world_to_shadow_clip = dir_light_id == 0 ?
+                    directional_light_matrix(light.direction, this->scene_data.bounds) :
+                    glm::identity<glm::mat4>(),
+                .shadow_map = dir_light_id == 0 ? 
+                    this->targets.get_indices(this->shadow_target, Sampler::LinearRepeat).value() :
+                    RenderTargetIndices {}
             });
+            dir_light_id++;
         }
 
         this->scene_data.scratch.clear();
         uint32_t object_id = 0;
         for (const auto& object: scene.mesh_objects) {
-            if (this->mesh_manager.is_valid(object.mesh)) {
+            if (this->meshes.is_valid(object.mesh)) {
                 this->scene_data.scratch.push_back({
                     .mesh_id = object.mesh,
                     .object_id = object_id,
@@ -716,7 +865,7 @@ private:
             const auto& object = scene.mesh_objects[entry.object_id];
             this->scene_data.instances.emplace_back(
                 object.transform,
-                this->material_manager.get_index(object.material)
+                this->materials.get_index(object.material)
             );
         }
 
@@ -731,7 +880,7 @@ private:
             {
                 i++;
             }
-            MeshData mesh = this->mesh_manager.get(mesh_id);
+            MeshDrawData mesh = this->meshes.get_draw_data(mesh_id);
             this->scene_data.draws.push_back({
                 .vertices = mesh.vertices_address,
                 .instance_offset = start
@@ -747,9 +896,7 @@ private:
         }
     }
 
-    FrameData write_frame_data(const Scene& scene) {
-        this->update_scene_draw_data(scene);
-
+    FrameData write_frame_data() {
         FrameSubBuffer view_data = this->frame_arena.add(scene_data.view).value();
         FrameSubBuffer light_data = this->frame_arena
             .add(LightData {
@@ -781,56 +928,86 @@ private:
     }
 
     void record_frame_commands(
-        vk::CommandBuffer command_buffer, 
+        vk::CommandBuffer cmd, 
         const SwapchainTexture& swapchain_texture,
         const Scene& scene
     ) {
-        FrameData data = this->write_frame_data(scene);
+        FrameData data = this->write_frame_data();
 
-        this->record_draw_commands(command_buffer, data);
-        this->record_tonemap_commands(command_buffer, swapchain_texture, scene);
+        this->record_shadow_commands(cmd, data);
+        this->record_draw_commands(cmd, data);
+        this->record_tonemap_commands(cmd, swapchain_texture, scene);
     }
 
-    void record_draw_commands(vk::CommandBuffer command_buffer, const FrameData& data) {
-        this->target_manager.use(
-            command_buffer, 
-            this->hdr_target, 
-            RenderTargetUsage()
-                .set_discard(true)
-                .set_new_state(
-                    RenderTargetSubresourceState()
-                        .set_access(vk::AccessFlagBits2::eColorAttachmentWrite)
-                        .set_stage(vk::PipelineStageFlagBits2::eColorAttachmentOutput)
-                        .set_layout(vk::ImageLayout::eColorAttachmentOptimal)
-                )
+    void record_shadow_commands(vk::CommandBuffer cmd, const FrameData& data) {
+        this->targets.use(cmd, this->shadow_target, RenderTargetUsage::depth_attachment());
+
+        glm::mat4 light_matrix = this->scene_data.dir_lights.empty()
+            ? glm::mat4(1.0f)
+            : directional_light_matrix(
+                this->scene_data.dir_lights.front().direction,
+                this->scene_data.bounds
+            );
+
+        ShadowConstants shadow_constants = {
+            .light_world_to_clip = light_matrix,
+            .instances = data.instances.address(),
+            .draws = data.draws.address(),
+        };
+        cmd.pushConstants<ShadowConstants>(
+            this->shadow_pipeline_layout,
+            vk::ShaderStageFlagBits::eVertex,
+            0, {shadow_constants}
         );
 
-        this->target_manager.use(
-            command_buffer, 
-            this->depth_target, 
-            RenderTargetUsage()
-                .set_discard(true)
-                .set_new_state(
-                    RenderTargetSubresourceState()
-                        .set_stage(vk::PipelineStageFlagBits2::eEarlyFragmentTests)
-                        .set_layout(vk::ImageLayout::eDepthAttachmentOptimal)
-                        .set_access(
-                            vk::AccessFlagBits2::eDepthStencilAttachmentRead
-                            | vk::AccessFlagBits2::eDepthStencilAttachmentWrite
-                        )
-                )
-        );
+        auto depth_attachment = vk::RenderingAttachmentInfo()
+            .setImageView(this->targets.get_texture(this->shadow_target)->default_view())
+            .setImageLayout(vk::ImageLayout::eDepthAttachmentOptimal)
+            .setClearValue(vk::ClearDepthStencilValue(0.0f))
+            .setLoadOp(vk::AttachmentLoadOp::eClear)
+            .setStoreOp(vk::AttachmentStoreOp::eStore);
+
+        auto rendering = vk::RenderingInfo()
+            .setLayerCount(1)
+            .setPDepthAttachment(&depth_attachment)
+            .setRenderArea(vk::Rect2D(vk::Offset2D(), this->shadow_resolution));
+
+        cmd.beginRendering(rendering);
+        cmd.setViewport(0, vk::Viewport(
+            0.0f, 0.0f, 
+            static_cast<float>(this->shadow_resolution.width),
+            static_cast<float>(this->shadow_resolution.height),
+            0.0f, 1.0f
+        ));
+        cmd.setScissor(0, vk::Rect2D(vk::Offset2D(), this->shadow_resolution));
+        cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, this->shadow_pipeline);
+        cmd.bindIndexBuffer(this->meshes.index_buffer(), 0, vk::IndexType::eUint32);
+        if (data.draw_commands.length() > 0) {
+            cmd.drawIndexedIndirect(
+                data.draw_commands.buffer(), 
+                data.draw_commands.buffer_offset(),
+                static_cast<uint32_t>(data.draw_commands.length()),
+                sizeof(vk::DrawIndexedIndirectCommand)
+            );
+        }
+        cmd.endRendering();
+    }
+
+    void record_draw_commands(vk::CommandBuffer cmd, const FrameData& data) {
+        this->targets.use(cmd, this->hdr_target, RenderTargetUsage::color_attachment());
+        this->targets.use(cmd, this->depth_target, RenderTargetUsage::depth_attachment());
+        this->targets.use(cmd, this->shadow_target, RenderTargetUsage::shader_read());
 
         DrawConstants draw_constants = {
             .view_data = data.view_data.address(),
             .light_data = data.light_data.address(),
             .point_lights = data.point_lights.address(),
             .directional_lights = data.dir_lights.address(),
-            .materials = this->material_manager.buffer_address(this->frame_index),
+            .materials = this->materials.buffer_address(this->frame_index),
             .instances = data.instances.address(),
             .draws = data.draws.address()
         };
-        command_buffer.pushConstants<DrawConstants>(
+        cmd.pushConstants<DrawConstants>(
             this->pipeline_layout,
             vk::ShaderStageFlagBits::eVertex 
                 | vk::ShaderStageFlagBits::eFragment,
@@ -838,7 +1015,7 @@ private:
         );
 
         auto color_attachment = vk::RenderingAttachmentInfo()
-            .setImageView(this->target_manager.get(this->hdr_target)->default_view())
+            .setImageView(this->targets.get_texture(this->hdr_target)->default_view())
             .setImageLayout(vk::ImageLayout::eColorAttachmentOptimal)
             .setClearValue(vk::ClearColorValue(
                 data.clear_color.r, 
@@ -850,7 +1027,7 @@ private:
             .setStoreOp(vk::AttachmentStoreOp::eStore);
 
         auto depth_attachment = vk::RenderingAttachmentInfo()
-            .setImageView(this->target_manager.get(this->depth_target)->default_view())
+            .setImageView(this->targets.get_texture(this->depth_target)->default_view())
             .setImageLayout(vk::ImageLayout::eDepthAttachmentOptimal)
             .setClearValue(vk::ClearDepthStencilValue(0.0f))
             .setLoadOp(vk::AttachmentLoadOp::eClear)
@@ -862,60 +1039,44 @@ private:
             .setPDepthAttachment(&depth_attachment)
             .setRenderArea(this->swapchain.full_area());
 
-        command_buffer.beginRendering(rendering);
-        command_buffer.setViewport(0, this->swapchain.full_viewport());
-        command_buffer.setScissor(0, this->swapchain.full_area());
-        command_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, this->pipeline);
-        command_buffer.bindDescriptorSets(
+        cmd.beginRendering(rendering);
+        cmd.setViewport(0, this->swapchain.full_viewport());
+        cmd.setScissor(0, this->swapchain.full_area());
+        cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, this->pipeline);
+        cmd.bindDescriptorSets(
             vk::PipelineBindPoint::eGraphics,
             this->pipeline_layout, 0,
-            {this->texture_manager.descriptor_set()}, {}
+            {
+                this->textures.descriptor_set(),
+                this->targets.descriptor_set()
+            }, 
+            {}
         );
-        command_buffer.bindIndexBuffer(this->mesh_manager.index_buffer(), 0, vk::IndexType::eUint32);
+        cmd.bindIndexBuffer(this->meshes.index_buffer(), 0, vk::IndexType::eUint32);
         if (data.draw_commands.length() > 0) {
-            command_buffer.drawIndexedIndirect(
+            cmd.drawIndexedIndirect(
                 data.draw_commands.buffer(), 
                 data.draw_commands.buffer_offset(),
                 static_cast<uint32_t>(data.draw_commands.length()),
                 sizeof(vk::DrawIndexedIndirectCommand)
             );
         }
-        command_buffer.endRendering();
+        cmd.endRendering();
     }
 
     void record_tonemap_commands(
-        vk::CommandBuffer command_buffer, 
+        vk::CommandBuffer cmd, 
         const SwapchainTexture& swapchain_texture,
         const Scene& scene
     ) {
-        this->target_manager.use(
-            command_buffer, 
-            this->hdr_target, 
-            RenderTargetUsage()
-                .set_new_state(
-                    RenderTargetSubresourceState()
-                        .set_stage(vk::PipelineStageFlagBits2::eFragmentShader)
-                        .set_access(vk::AccessFlagBits2::eShaderRead)
-                        .set_layout(vk::ImageLayout::eShaderReadOnlyOptimal)
-                )
-        );
-        this->target_manager.use(
-            command_buffer,
-            this->swapchain_target,
-            RenderTargetUsage()
-                .set_discard(true)
-                .set_new_state(
-                    RenderTargetSubresourceState()
-                        .set_stage(vk::PipelineStageFlagBits2::eColorAttachmentOutput)
-                        .set_access(vk::AccessFlagBits2::eColorAttachmentWrite)
-                        .set_layout(vk::ImageLayout::eColorAttachmentOptimal)
-                )
-        );
-        command_buffer.pushConstants<TonemapConstants>(
+        this->targets.use(cmd, this->hdr_target, RenderTargetUsage::shader_read());
+        this->targets.use(cmd, this->swapchain_target, RenderTargetUsage::color_attachment());
+
+        cmd.pushConstants<TonemapConstants>(
             this->tonemap_pipeline_layout,
             vk::ShaderStageFlagBits::eFragment,
             0, {TonemapConstants(
-                this->target_manager.get_indices(this->hdr_target).value(), 
+                this->targets.get_indices(this->hdr_target).value(), 
                 scene.post.tonemap, 
                 scene.camera.film.exposure
             )}
@@ -931,35 +1092,27 @@ private:
             .setColorAttachments(color_attachment)
             .setRenderArea(this->swapchain.full_area());
 
-        command_buffer.beginRendering(rendering);
-        command_buffer.setViewport(0, this->swapchain.full_viewport());
-        command_buffer.setScissor(0, this->swapchain.full_area());
-        command_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, this->tonemap_pipeline);
-        command_buffer.bindDescriptorSets(
+        cmd.beginRendering(rendering);
+        cmd.setViewport(0, this->swapchain.full_viewport());
+        cmd.setScissor(0, this->swapchain.full_area());
+        cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, this->tonemap_pipeline);
+        cmd.bindDescriptorSets(
             vk::PipelineBindPoint::eGraphics,
             this->tonemap_pipeline_layout, 0,
             {
-                this->texture_manager.descriptor_set(),
-                this->target_manager.descriptor_set()
+                this->textures.descriptor_set(),
+                this->targets.descriptor_set()
             }, 
             {}
         );
-        command_buffer.draw(3, 1, 0, 0);
-        command_buffer.endRendering();
+        cmd.draw(3, 1, 0, 0);
+        cmd.endRendering();
 
-        this->target_manager.use(
-            command_buffer,
+        this->targets.use(
+            cmd,
             this->swapchain_target,
-            RenderTargetUsage()
-                .set_new_state(
-                    RenderTargetSubresourceState()
-                        .set_layout(vk::ImageLayout::ePresentSrcKHR)
-                )
+            RenderTargetUsage::present()
         );
-    }
-
-    void record_image_barrier(vk::CommandBuffer command_buffer, vk::ImageMemoryBarrier2 barrier) {
-        command_buffer.pipelineBarrier2(vk::DependencyInfo().setImageMemoryBarriers(barrier));
     }
 
     vk::CommandBuffer begin_frame_commands() {
@@ -976,13 +1129,10 @@ private:
         return command_buffer;
     }
 
-    void submit_frame_commands(
-        vk::CommandBuffer command_buffer, 
-        const SwapchainTexture& swapchain_texture
-    ) {
-        vk_expect(command_buffer.end(), "Failed to end command buffer");
+    void submit_frame_commands(vk::CommandBuffer cmd, const SwapchainTexture& swapchain_texture) {
+        vk_expect(cmd.end(), "Failed to end command buffer");
 
-        auto command_buffer_info = vk::CommandBufferSubmitInfo().setCommandBuffer(command_buffer);
+        auto command_buffer_info = vk::CommandBufferSubmitInfo().setCommandBuffer(cmd);
 
         auto wait_info = vk::SemaphoreSubmitInfo()
             .setSemaphore(swapchain_texture.available)
@@ -1003,39 +1153,6 @@ private:
             "Failed to submit command buffer"
         );
     }
-
-    InstanceHandle instance;
-    DeviceHandle device;
-    Swapchain swapchain;
-    SwapchainConfigureInfo swapchain_info;
-    bool should_reconfigure_swapchain = false;
-
-    std::vector<vk::Fence> fences;              // One per frame in flight
-    std::vector<vk::Semaphore> image_available; // One per frame in flight
-
-    uint32_t frame_index = 0;
-    uint64_t frame_counter = 0;
-
-    vk::CommandPool command_pool;
-    std::vector<vk::CommandBuffer> command_buffers; // One per frame in flight
-
-    vk::Pipeline pipeline;
-    vk::PipelineLayout pipeline_layout;
-
-    vk::Pipeline tonemap_pipeline;
-    vk::PipelineLayout tonemap_pipeline_layout;
-
-    RenderTargetId swapchain_target;
-    RenderTargetId hdr_target;
-    RenderTargetId depth_target;
-
-    Uploader uploader;
-    FrameArenaBuffer frame_arena;
-    RenderTargetManager target_manager;
-    TextureManager texture_manager;
-    MaterialManager material_manager;
-    MeshManager mesh_manager;
-    SceneDrawData scene_data;
 };
 
 Renderer::Renderer() = default;
@@ -1058,47 +1175,47 @@ Renderer& Renderer::operator=(Renderer&& other) noexcept {
 }
 
 void Renderer::resize() {
-    this->inner->resize();
+    this->inner->should_reconfigure_swapchain = true;
 }
 
 MaterialId Renderer::add_material(const Material& material) {
-    return this->inner->add_material(material);
+    return this->inner->materials.add(material);
 }
 
-const Material* Renderer::get_material(MaterialId id) {
-    return this->inner->get_material(id);
+const Material* Renderer::get_material(MaterialId id) const {
+    return this->inner->materials.get(id);
 }
 
 void Renderer::set_material(MaterialId id, const Material& material) {
-    return this->inner->set_material(id, material);
+    return this->inner->materials.set(id, material);
 }
 
 void Renderer::free_material(MaterialId id) {
-    return this->inner->free_material(id);
+    return this->inner->materials.free(id);
 }
 
 TextureId Renderer::add_texture(const Image& image) {
-    return this->inner->add_texture(image);
+    return this->inner->textures.add(this->inner->uploader, image);
 }
 
 void Renderer::set_texture(TextureId id, const Image& image) {
-    return this->inner->set_texture(id, image);
+    return this->inner->textures.set(id, this->inner->uploader, image);
 }
 
 void Renderer::free_texture(TextureId id) {
-    return this->inner->free_texture(id);
+    return this->inner->textures.free(id);
 }
 
 MeshId Renderer::add_mesh(const Mesh& mesh) {
-    return this->inner->add_mesh(mesh);
+    return this->inner->meshes.add(this->inner->uploader, mesh);
 }
 
 void Renderer::set_mesh(MeshId id, const Mesh& mesh) {
-    this->inner->set_mesh(id, mesh);
+    this->inner->meshes.set(id, this->inner->uploader, mesh);
 }
 
 void Renderer::free_mesh(MeshId id) {
-    this->inner->free_mesh(id);
+    this->inner->meshes.free(id);
 }
 
 void Renderer::draw(const Scene& scene) {

@@ -53,36 +53,44 @@ struct Transform {
         return *this;
     }
 
+    [[nodiscard]]
     glm::vec3 forward() const {
         return this->rotation * glm::vec3(0.0, 0.0, 1.0);
     }
 
+    [[nodiscard]]
     glm::vec3 back() const {
         return this->rotation * glm::vec3(0.0, 0.0, -1.0);
     }
 
+    [[nodiscard]]
     glm::vec3 down() const {
         return this->rotation * glm::vec3(0.0, 1.0, 0.0);
     }
 
+    [[nodiscard]]
     glm::vec3 up() const {
         return this->rotation * glm::vec3(0.0, -1.0, 0.0);
     }
 
+    [[nodiscard]]
     glm::vec3 right() const {
         return this->rotation * glm::vec3(1.0, 0.0, 0.0);
     }
 
+    [[nodiscard]]
     glm::vec3 left() const {
         return this->rotation * glm::vec3(-1.0, 0.0, 0.0);
     }
     
+    [[nodiscard]]
     glm::mat4 matrix() const {
         glm::mat4 matrix(glm::mat3_cast(this->rotation) * this->scale);
         matrix[3] = glm::vec4(this->translation, 1.0f);
         return matrix;
     }
 
+    [[nodiscard]]
     glm::mat4 inverse_matrix() const {
         float inv_scale = 1.0f / this->scale;
         glm::quat inv_rotation = glm::inverse(this->rotation);
@@ -90,12 +98,14 @@ struct Transform {
         return glm::translate(matrix, -this->translation);
     }
 
+    [[nodiscard]]
     glm::mat4x3 affine_matrix() const {
         glm::mat4x3 matrix(glm::mat3_cast(this->rotation) * this->scale);
         matrix[3] = this->translation;
         return matrix;
     }
 
+    [[nodiscard]]
     Transform operator*(const Transform& child) const {
         return {
             this->translation + (this->rotation * (child.translation * this->scale)),

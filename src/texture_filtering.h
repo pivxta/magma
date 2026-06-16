@@ -1,6 +1,12 @@
 #pragma once
 #include <cstdint>
 
+enum class ComparisonSampler: uint8_t {
+    Linear = 0,
+    Nearest,
+    Count
+};
+
 enum class Sampler: uint8_t {
     LinearRepeat = 0,
     NearestRepeat,
@@ -16,19 +22,19 @@ enum class Filter: uint8_t {
     Linear
 };
 
-struct GlobalSamplerInfo {
+struct TextureSamplerInfo {
     Filter minify_filter = Filter::Linear;
     Filter mip_map_filter = Filter::Linear;
     float max_anisotropy = 1;
     float lod_bias = 0.0f;
     float min_lod = 0.0f;
 
-    GlobalSamplerInfo& set_minify_filter(Filter filter) {
+    TextureSamplerInfo& set_minify_filter(Filter filter) {
         this->minify_filter = filter;
         return *this;
     }
 
-    GlobalSamplerInfo& set_max_anisotroy(float anisotropy) {
+    TextureSamplerInfo& set_max_anisotroy(float anisotropy) {
         if (anisotropy > 1) {
             this->max_anisotropy = anisotropy;
         } else {
@@ -37,12 +43,12 @@ struct GlobalSamplerInfo {
         return *this;
     }
 
-    GlobalSamplerInfo& set_lod_bias(float lod_bias) {
+    TextureSamplerInfo& set_lod_bias(float lod_bias) {
         this->lod_bias = lod_bias;
         return *this;
     }
 
-    GlobalSamplerInfo& set_min_lod(float min_lod) {
+    TextureSamplerInfo& set_min_lod(float min_lod) {
         this->min_lod = min_lod;
         return *this;
     }

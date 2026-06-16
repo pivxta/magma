@@ -38,6 +38,7 @@ public:
         return std::nullopt;
     }
 
+    [[nodiscard]]
     PerformanceStats get_stats() {
         if (this->frame_times.empty()) {
             auto since_last_clean_ms = this->last_clean.elapsed_milliseconds<double>();

@@ -11,6 +11,7 @@ struct OrthographicProjection {
     float near = 0.001f;
     float far = 1000.0f;
     
+    [[nodiscard]]
     glm::mat4 view_to_clip(float viewport_width, float viewport_height) const {
         float aspect_ratio = viewport_width / viewport_height;
         float h = this->viewport_height * this->scale;
@@ -30,6 +31,7 @@ struct PerspectiveProjection {
     float fov_radians = glm::radians(90.0f);
     float near = 0.001f;
     
+    [[nodiscard]]
     glm::mat4 view_to_clip(float viewport_width, float viewport_height) const {
         float f = 1.0f / std::tan(this->fov_radians * 0.5f);
         auto m = glm::mat4(0.0f);
@@ -46,7 +48,8 @@ using Projection = std::variant<
     OrthographicProjection
 >;
 
-static glm::mat4 get_view_to_clip(const Projection& projection, float width, float height) {
+[[nodiscard]]
+static inline glm::mat4 get_view_to_clip(const Projection& projection, float width, float height) {
     return std::visit([width, height](const auto& proj) -> glm::mat4 {
         return proj.view_to_clip(width, height);
     }, projection);
@@ -87,14 +90,17 @@ struct Camera {
         return *this;
     }
 
+    [[nodiscard]]
     glm::mat4 world_to_view() const {
         return this->transform.inverse_matrix();
     }
 
+    [[nodiscard]]
     glm::mat4 view_to_clip(float viewport_width, float viewport_height) const {
         return get_view_to_clip(this->projection, viewport_width, viewport_height);
     }
 
+    [[nodiscard]]
     glm::mat4 world_to_clip(float viewport_width, float viewport_height) const {
         return this->view_to_clip(viewport_width, viewport_height) * this->world_to_view();
     }

@@ -30,6 +30,8 @@ struct TextureViewCreateInfo {
     }
 };
 
+static inline vk::ImageAspectFlags get_default_aspect_flags(vk::Format format);
+
 class Texture {
 public:
     Texture() = default;
@@ -89,6 +91,10 @@ public:
 
     vk::Format format() const {
         return this->format_;
+    }
+
+    vk::ImageAspectFlags used_aspects() const {
+        return get_default_aspect_flags(this->format_);
     }
 
     vk::SampleCountFlagBits samples() const {

@@ -1,11 +1,14 @@
 #pragma once
 #include <vector>
 #include <span>
+#include <optional>
 #include <glm/vec4.hpp>
 #include <glm/vec3.hpp>
 #include <glm/vec2.hpp>
+#include "aabb.h"
 
 struct Mesh {
+    std::optional<Aabb> aabb;
     std::vector<uint32_t> indices;
     std::vector<glm::vec3> positions;
     std::vector<glm::vec3> normals;

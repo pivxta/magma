@@ -15,7 +15,7 @@
 
 struct ControllerSettings {
     float max_movement_speed = 3.0f;
-    float movement_damping = 15.0f;
+    float movement_damping = 9.0f;
     float mouse_sensitivity = 0.002f;
     float scroll_sensitivity = 0.07f;
     float zoom_damping = 8.0f;
@@ -223,7 +223,7 @@ private:
         MeshId sphere = this->renderer.add_mesh(Sphere(0.4f).to_mesh());
         MeshId cylinder = this->renderer.add_mesh(Cylinder(1.0f, 0.2f).to_mesh());
 
-        this->scene.clear_color = glm::vec3(0.1f, 0.1f, 0.1f);
+        this->scene.clear_color = glm::vec3(0.03f, 0.03f, 0.03f);
         this->scene.ambient_light = AmbientLight()
             .set_color(glm::vec3(0.1f, 0.1f, 0.1f))
             .set_illuminance(1.0f);
@@ -256,12 +256,19 @@ private:
                 .set_transform(Transform(-2.0f, 1.6f, -1.0f))
         );
 
+        /*
         this->scene.add(
             PointLight()
                 .set_intensity(1000.0f)
                 .set_color(glm::vec3(1.0f))
                 .set_radius(8.0f)
                 .set_position(glm::vec3(0.0f, -1.0f, 0.0f))
+        );
+        */
+        this->scene.add(
+            DirectionalLight()
+                .set_illuminance(4.0f)
+                .set_direction(glm::vec3(18.0f, 2.0f, 0.5f))
         );
     }
 

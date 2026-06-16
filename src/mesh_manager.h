@@ -6,7 +6,7 @@
 #include "mesh.h"
 #include <glm/glm.hpp>
 
-struct MeshData {
+struct MeshDrawData {
     vk::DeviceAddress vertices_address;
     uint32_t index_offset;
     uint32_t index_count;
@@ -35,7 +35,8 @@ public:
     MeshManager(MeshManager&&) noexcept = default;
     MeshManager& operator=(MeshManager&&) noexcept = default;
 
-    MeshData get(MeshId id) const;
+    MeshDrawData get_draw_data(MeshId id) const;
+    Aabb get_bounds(MeshId id) const;
     MeshId reserve();
     MeshId add(Uploader& uploader, const Mesh& mesh);
     bool set(MeshId id, Uploader& uploader, const Mesh& mesh);
@@ -51,16 +52,17 @@ public:
     }
 
 private:
-    struct MeshSubBuffers {
+    struct MeshData {
         HeapSubBuffer<VertexData> vertices;
         HeapSubBuffer<uint32_t> indices;
+        Aabb bounds;
     };
 
-    static SlotKey<MeshSubBuffers> get_slot_key(MeshId id);
-    std::optional<MeshSubBuffers> create_sub_buffers(Uploader& uploader, const Mesh& mesh);
+    static SlotKey<MeshData> get_slot_key(MeshId id);
+    std::optional<MeshData> create_data(Uploader& uploader, const Mesh& mesh);
 
     HeapBuffer vertex_heap;
     HeapBuffer index_heap;
 
-    SlotMap<MeshSubBuffers> meshes;
+    SlotMap<MeshData> meshes;
 };

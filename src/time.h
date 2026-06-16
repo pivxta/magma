@@ -5,10 +5,12 @@
 class Instant {
 public:
     Instant() = delete;
+
+    [[nodiscard]]
     static Instant now();
 
     template<typename T>
-    T elapsed_seconds() const {
+    [[nodiscard]] T elapsed_seconds() const {
         if constexpr (std::is_floating_point_v<T>) {
             return static_cast<T>(elapsed_nanoseconds()) / static_cast<T>(1000000000.0);
         } else {
@@ -17,7 +19,7 @@ public:
     }
 
     template<typename T>
-    T elapsed_milliseconds() const {
+    [[nodiscard]] T elapsed_milliseconds() const {
         if constexpr (std::is_floating_point_v<T>) {
             return static_cast<T>(elapsed_nanoseconds()) / static_cast<T>(1000000.0);
         } else {
@@ -26,7 +28,7 @@ public:
     }
 
     template<typename T>
-    T elapsed_microseconds() const {
+    [[nodiscard]] T elapsed_microseconds() const {
         if constexpr (std::is_floating_point_v<T>) {
             return static_cast<T>(elapsed_nanoseconds()) / static_cast<T>(1000.0);
         } else {
@@ -34,6 +36,7 @@ public:
         }
     }
 
+    [[nodiscard]]
     uint64_t elapsed_nanoseconds() const {
         return now().nanoseconds - this->nanoseconds;
     }

@@ -30,6 +30,7 @@ struct SwapchainAdjustedSizePolicy {
 struct FixedSizePolicy {
     vk::Extent2D extent;
 
+    FixedSizePolicy(uint32_t width, uint32_t height): extent(vk::Extent2D(width, height)) {}
     FixedSizePolicy(vk::Extent2D extent): extent(extent) {}
 };
 
@@ -111,6 +112,48 @@ struct RenderTargetUsage {
     RenderTargetSubresourceState new_state;
     bool discard = false;
 
+    static RenderTargetUsage color_attachment() {
+        return RenderTargetUsage().set_new_state(
+            RenderTargetSubresourceState()
+                .set_layout(vk::ImageLayout::eColorAttachmentOptimal)
+                .set_stage(vk::PipelineStageFlagBits2::eColorAttachmentOutput)
+                .set_access(vk::AccessFlagBits2::eColorAttachmentWrite)
+        ).set_discard(true);
+    }
+
+    static RenderTargetUsage depth_attachment() {
+        return RenderTargetUsage().set_new_state(
+            RenderTargetSubresourceState()
+                .set_layout(vk::ImageLayout::eDepthAttachmentOptimal)
+                .set_stage(
+                    vk::PipelineStageFlagBits2::eEarlyFragmentTests
+                        | vk::PipelineStageFlagBits2::eLateFragmentTests
+                )
+                .set_access(
+                    vk::AccessFlagBits2::eDepthStencilAttachmentWrite
+                        | vk::AccessFlagBits2::eDepthStencilAttachmentRead
+                )
+        ).set_discard(true);
+    }
+
+    static RenderTargetUsage shader_read() {
+        return RenderTargetUsage().set_new_state(
+            RenderTargetSubresourceState()
+                .set_layout(vk::ImageLayout::eShaderReadOnlyOptimal)
+                .set_stage(vk::PipelineStageFlagBits2::eFragmentShader)
+                .set_access(vk::AccessFlagBits2::eShaderSampledRead)
+        );
+    }
+
+    static RenderTargetUsage present() {
+        return RenderTargetUsage().set_new_state(
+            RenderTargetSubresourceState()
+                .set_layout(vk::ImageLayout::ePresentSrcKHR)
+                .set_stage(vk::PipelineStageFlagBits2::eNone)
+                .set_access(vk::AccessFlagBits2::eNone)
+        );
+    }
+
     RenderTargetUsage& set_base_mip_level(uint32_t value) {
         this->base_mip_level = value;
         return *this;
@@ -173,18 +216,19 @@ public:
     }
 
     std::optional<RenderTargetId> add(const RenderTargetInfo& info);
-    std::optional<RenderTargetIndices> 
-    get_indices(RenderTargetId id, Sampler sampler = Sampler::LinearRepeat);
-    const Texture* get(RenderTargetId id);
-    void free(RenderTargetId id);
-
     std::optional<RenderTargetId> reserve(); 
-
-    bool bind(
+    void bind(RenderTargetId id, const Texture& texture);
+    void free(RenderTargetId id);
+    
+    const Texture* get_texture(RenderTargetId id) const;
+    std::optional<RenderTargetIndices> get_indices(
         RenderTargetId id, 
-        const Texture& texture, 
-        RenderTargetSubresourceState state = {}
-    );
+        Sampler sampler = Sampler::LinearRepeat
+    ) const;
+    std::optional<RenderTargetIndices> get_indices(
+        RenderTargetId id, 
+        ComparisonSampler sampler
+    ) const;
 
     void use(
         vk::CommandBuffer command_buffer, 
@@ -208,7 +252,7 @@ public:
         RenderTargetId id, 
         uint32_t array_layer = 0, 
         uint32_t mip_level = 0
-    );
+    ) const;
 
     vk::DescriptorSet descriptor_set() const {
         return this->bindless_set.descriptor_set();
@@ -223,22 +267,27 @@ public:
 
 private:
     struct Target {
+        bool owned = false;
+        const Texture* bound = nullptr;
         RenderTargetBuffering buffering = RenderTargetBuffering::Shared;
         std::optional<SizePolicy> size_policy;
         std::vector<RenderTargetSubresourceState> states;
-        std::vector<SlotKey<Texture>> keys;
-        std::vector<const Texture*> textures;
+        std::vector<BindlessKey> keys; 
         uint32_t mip_levels = 0;
         uint32_t array_layers = 0;
-        bool owned = false;
     };
+
+    size_t get_state_index(const Target& target, uint32_t array_layer, uint32_t mip_level) const;
+    size_t get_state_count(const Target& target) const;
+    size_t get_texture_count(const RenderTargetInfo& info) const;
 
     static SlotKey<Target> get_slot_key(RenderTargetId id);
     static RenderTargetId get_target_id(SlotKey<Target> key);
-    size_t get_state_index(const Target& target, uint32_t array_layer, uint32_t mip_level);
-    bool create_textures(Target& target, const RenderTargetInfo& info);
-    bool recreate_textures(Target& target);
-    const Texture* get_target_texture(const Target& target);
+    std::optional<Target> create_target(const RenderTargetInfo& info);
+    bool initialize_target(Target& target, const RenderTargetInfo& info);
+    bool recreate_target(Target& target);
+    const Texture* get_target_texture(const Target& target) const;
+    uint32_t get_current_bindless_index(const Target& target) const;
 
     BindlessSet bindless_set;
     SlotMap<Target> targets;

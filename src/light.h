@@ -20,6 +20,9 @@ struct DirectionalLight {
     glm::vec3 direction = glm::vec3(0.0, 1.0, 0.0);
     glm::vec3 color = glm::vec3(1.0);
     float illuminance = 10.0;
+    bool shadows_enabled = false;
+    float shadow_bias_constant_factor = 1.5f;
+    float shadow_bias_slope_factor = 2.0f;
 
     DirectionalLight& set_direction(glm::vec3 direction) {
         this->direction = direction;
@@ -35,6 +38,21 @@ struct DirectionalLight {
         this->illuminance = illuminance;
         return *this;
     }
+
+    DirectionalLight& set_shadows_enabled(bool enabled) {
+        this->shadows_enabled = enabled;
+        return *this;
+    }
+
+    DirectionalLight& set_shadow_bias_constant_factor(float value) {
+        this->shadow_bias_constant_factor = value;
+        return *this;
+    }
+
+    DirectionalLight& set_shadow_bias_slope_factor(float value) {
+        this->shadow_bias_slope_factor = value;
+        return *this;
+    }
 };
 
 struct PointLight {
@@ -42,6 +60,9 @@ struct PointLight {
     float radius = 30.0f;
     glm::vec3 color = glm::vec3(1.0);
     float intensity = 200.0;
+    bool shadows_enabled = false;
+    float shadow_bias_constant_factor = 1.5f;
+    float shadow_bias_slope_factor = 2.0f;
 
     PointLight& set_position(glm::vec3 position) {
         this->position = position;
