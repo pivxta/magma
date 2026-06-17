@@ -265,6 +265,39 @@ static bool create_device_and_queue(DeviceContext& device) {
         }
     }
 
+    // Report any requested device feature the driver doesn't support 
+    auto feature_support = device.physical.getFeatures2<
+        vk::PhysicalDeviceFeatures2,
+        vk::PhysicalDeviceVulkan11Features,
+        vk::PhysicalDeviceVulkan12Features,
+        vk::PhysicalDeviceDynamicRenderingFeaturesKHR,
+        vk::PhysicalDeviceSynchronization2FeaturesKHR
+    >();
+    const auto& support10 = feature_support.get<vk::PhysicalDeviceFeatures2>().features;
+    const auto& support11 = feature_support.get<vk::PhysicalDeviceVulkan11Features>();
+    const auto& support12 = feature_support.get<vk::PhysicalDeviceVulkan12Features>();
+    const auto& support_dyn_render = feature_support.get<vk::PhysicalDeviceDynamicRenderingFeaturesKHR>();
+    const auto& support_sync2 = feature_support.get<vk::PhysicalDeviceSynchronization2FeaturesKHR>();
+    auto require_feature = [](const char* name, vk::Bool32 ok) {
+        if (!ok) {
+            spdlog::error("Requested device feature not supported: {}", name);
+        }
+    };
+    require_feature("samplerAnisotropy", support10.samplerAnisotropy);
+    require_feature("multiDrawIndirect", support10.multiDrawIndirect);
+    require_feature("shaderDrawParameters", support11.shaderDrawParameters);
+    require_feature("multiview", support11.multiview);
+    require_feature("drawIndirectCount", support12.drawIndirectCount);
+    require_feature("scalarBlockLayout", support12.scalarBlockLayout);
+    require_feature("bufferDeviceAddress", support12.bufferDeviceAddress);
+    require_feature("descriptorIndexing", support12.descriptorIndexing);
+    require_feature("runtimeDescriptorArray", support12.runtimeDescriptorArray);
+    require_feature("descriptorBindingPartiallyBound", support12.descriptorBindingPartiallyBound);
+    require_feature("descriptorBindingSampledImageUpdateAfterBind", support12.descriptorBindingSampledImageUpdateAfterBind);
+    require_feature("shaderSampledImageArrayNonUniformIndexing", support12.shaderSampledImageArrayNonUniformIndexing);
+    require_feature("dynamicRendering", support_dyn_render.dynamicRendering);
+    require_feature("synchronization2", support_sync2.synchronization2);
+
     auto [result, logical] = device.physical.createDevice(
         vk::DeviceCreateInfo()
             .setPEnabledFeatures(&features)
