@@ -247,6 +247,24 @@ static bool create_device_and_queue(DeviceContext& device) {
         enabled_extensions.push_back(vk::KHRSynchronization2ExtensionName);
     }
 
+    // Report any requested device extension the driver doesn't advertise, so a
+    // createDevice failure is diagnosable
+    auto [ext_result, supported] = device.physical.enumerateDeviceExtensionProperties();
+    if (ext_result == vk::Result::eSuccess) {
+        for (const char* required : enabled_extensions) {
+            bool present = false;
+            for (const auto& ext : supported) {
+                if (strcmp(ext.extensionName, required) == 0) {
+                    present = true;
+                    break;
+                }
+            }
+            if (!present) {
+                spdlog::error("Requested device extension not supported: {}", required);
+            }
+        }
+    }
+
     auto [result, logical] = device.physical.createDevice(
         vk::DeviceCreateInfo()
             .setPEnabledFeatures(&features)
@@ -255,7 +273,7 @@ static bool create_device_and_queue(DeviceContext& device) {
             .setPNext(&features12)
     );
     if (result != vk::Result::eSuccess) {
-        spdlog::error("Failed to create device");
+        spdlog::error("Failed to create device: {}", vk::to_string(result));
         return false;
     }
 
