@@ -1,6 +1,7 @@
 #pragma once
 #include <variant>
 #include <cmath>
+#include <array>
 #include <glm/vec3.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/mat4x4.hpp>

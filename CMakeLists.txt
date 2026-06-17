@@ -208,7 +208,7 @@ add_shaders(
         shaders/parallax.slang
         shaders/pbr_material.slang
 )
-add_compile_definitions(VULKAN_HPP_NO_EXCEPTIONS GLFW_INCLUDE_VULKAN)
+add_compile_definitions(VULKAN_HPP_NO_EXCEPTIONS GLFW_INCLUDE_VULKAN VULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1)
 
 if (ENABLE_CLANG_TIDY)
     find_program(CLANG_TIDY_EXECUTABLE NAMES clang-tidy REQUIRED)

@@ -4,6 +4,8 @@
 #include "target.h"
 #include <spdlog/spdlog.h>
 
+VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
+
 #ifdef NDEBUG
 static constexpr bool ENABLE_VALIDATION_LAYERS = false;
 #else
@@ -58,6 +60,8 @@ static vk::DebugUtilsMessengerCreateInfoEXT make_debug_messenger_create_info() {
 }
 
 InstanceHandle create_instance(const Target& target) {
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(vkGetInstanceProcAddr);
+
     std::vector<const char*> instance_layers;
     if constexpr (ENABLE_VALIDATION_LAYERS) {
         if (validation_layer_available()) {
@@ -92,6 +96,8 @@ InstanceHandle create_instance(const Target& target) {
 
     auto [result, instance] = vk::createInstance(instance_ci);
     vk_expect(result, "Failed to create instance");
+
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(instance);
 
     vk::DebugUtilsMessengerEXT debug_messenger = {};
     if (validation_enabled) {
@@ -167,7 +173,7 @@ static bool pick_physical_device(DeviceContext& device, vk::SurfaceKHR surface) 
 
     for (auto physical : devices) {
         vk::PhysicalDeviceProperties2 props = physical.getProperties2();
-        if (props.properties.apiVersion < vk::ApiVersion13) {
+        if (props.properties.apiVersion < vk::ApiVersion12) {
             continue;
         }
         if (!device_has_swapchain_ext(physical)) {
@@ -199,46 +205,61 @@ static bool pick_physical_device(DeviceContext& device, vk::SurfaceKHR surface) 
 
 static bool create_device_and_queue(DeviceContext& device) {
     std::array queue_priorities = {1.0f};
-    std::array enabled_extensions = {vk::KHRSwapchainExtensionName};
+    auto queue_ci = vk::DeviceQueueCreateInfo()
+        .setQueuePriorities(queue_priorities)
+        .setQueueFamilyIndex(device.graphics_queue_family);
+
     auto features = vk::PhysicalDeviceFeatures()
         .setSamplerAnisotropy(true)
         .setMultiDrawIndirect(true);
 
+    auto features11 = vk::PhysicalDeviceVulkan11Features()
+        .setShaderDrawParameters(true)
+        .setMultiview(true);
+
+    auto features12 = vk::PhysicalDeviceVulkan12Features()
+        .setDrawIndirectCount(true)
+        .setScalarBlockLayout(true)
+        .setBufferDeviceAddress(true)
+        .setDescriptorIndexing(true)
+        .setRuntimeDescriptorArray(true)
+        .setDescriptorBindingPartiallyBound(true)
+        .setDescriptorBindingSampledImageUpdateAfterBind(true)
+        .setShaderSampledImageArrayNonUniformIndexing(true);
+
+    auto features13 = vk::PhysicalDeviceVulkan13Features()
+        .setDynamicRendering(true)
+        .setSynchronization2(true);
+    auto dynamic_rendering = vk::PhysicalDeviceDynamicRenderingFeaturesKHR()
+        .setDynamicRendering(true);
+    auto synchronization2 = vk::PhysicalDeviceSynchronization2FeaturesKHR()
+        .setSynchronization2(true);
+
+    std::vector<const char*> enabled_extensions = {vk::KHRSwapchainExtensionName};
+
+    features12.setPNext(&features11);
+    if (device.properties.properties.apiVersion >= vk::ApiVersion13) {
+        features11.setPNext(&features13);
+    } else {
+        features11.setPNext(&dynamic_rendering);
+        dynamic_rendering.setPNext(&synchronization2);
+        enabled_extensions.push_back(vk::KHRDynamicRenderingExtensionName);
+        enabled_extensions.push_back(vk::KHRSynchronization2ExtensionName);
+    }
+
     auto [result, logical] = device.physical.createDevice(
-        vk::StructureChain{
-            vk::DeviceCreateInfo()
-                .setPEnabledFeatures(&features)
-                .setPEnabledExtensionNames(enabled_extensions)
-                .setQueueCreateInfos(
-                    vk::DeviceQueueCreateInfo()
-                        .setQueuePriorities(queue_priorities)
-                        .setQueueFamilyIndex(device.graphics_queue_family)
-                ),
-
-            vk::PhysicalDeviceVulkan13Features()
-                .setDynamicRendering(true)
-                .setSynchronization2(true),
-            
-            vk::PhysicalDeviceVulkan12Features()
-                .setDrawIndirectCount(true)
-                .setScalarBlockLayout(true)
-                .setBufferDeviceAddress(true)
-                .setDescriptorIndexing(true)
-                .setRuntimeDescriptorArray(true)
-                .setDescriptorBindingPartiallyBound(true)
-                .setDescriptorBindingSampledImageUpdateAfterBind(true)
-                .setShaderSampledImageArrayNonUniformIndexing(true),
-
-            vk::PhysicalDeviceVulkan11Features()
-                .setShaderDrawParameters(true)
-                .setMultiview(true)
-        }.get()
+        vk::DeviceCreateInfo()
+            .setPEnabledFeatures(&features)
+            .setPEnabledExtensionNames(enabled_extensions)
+            .setQueueCreateInfos(queue_ci)
+            .setPNext(&features12)
     );
     if (result != vk::Result::eSuccess) {
         spdlog::error("Failed to create device");
         return false;
     }
 
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(logical);
     device.logical = logical;
     device.graphics_queue = logical.getQueue(device.graphics_queue_family, 0);
 
