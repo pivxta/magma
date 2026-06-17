@@ -7,28 +7,28 @@ struct Transform {
     glm::quat rotation = glm::identity<glm::quat>();
     float scale = 1.0f;
 
-    Transform(glm::vec3 translation, glm::quat rotation, float scale): 
+    explicit Transform(glm::vec3 translation, glm::quat rotation, float scale): 
         translation(translation), rotation(rotation), scale(scale) {}
 
-    Transform(glm::vec3 translation, glm::quat rotation): 
+    explicit Transform(glm::vec3 translation, glm::quat rotation): 
         translation(translation), rotation(rotation) {}
 
-    Transform(glm::vec3 translation, float scale): 
+    explicit Transform(glm::vec3 translation, float scale): 
         translation(translation), scale(scale) {}
 
-    Transform(glm::vec3 translation): 
+    explicit Transform(glm::vec3 translation): 
         translation(translation) {}
 
-    Transform(float x, float y, float z): 
+    explicit Transform(float x, float y, float z): 
         translation(glm::vec3(x, y, z)) {}
 
-    Transform(glm::quat rotation, float scale): 
+    explicit Transform(glm::quat rotation, float scale): 
         rotation(rotation), scale(scale) {}
     
-    Transform(glm::quat rotation): 
+    explicit Transform(glm::quat rotation): 
         rotation(rotation) {}
 
-    Transform(float scale): 
+    explicit Transform(float scale): 
         scale(scale) {}
     
     Transform() = default;
@@ -106,12 +106,17 @@ struct Transform {
     }
 
     [[nodiscard]]
+    glm::vec3 operator*(const glm::vec3& vector) const {
+        return this->translation + (this->rotation * (vector * this->scale));
+    }
+
+    [[nodiscard]]
     Transform operator*(const Transform& child) const {
-        return {
+        return Transform(
             this->translation + (this->rotation * (child.translation * this->scale)),
             this->rotation * child.rotation,
             this->scale * child.scale
-        };
+        );
     }
 
     Transform& operator*=(const Transform& child) {

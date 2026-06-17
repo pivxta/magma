@@ -4,29 +4,22 @@
 #include "texture_filtering.h"
 #include "slot_map.h"
 
-enum class BindlessType: uint8_t {
-    Texture2D,
-    Texture2DArray
-};
-
-struct BindlessKey { 
-    BindlessType type;
-    SlotKey<Texture> key;
-
-    uint32_t index() const {
-        return key.index;
-    }
-};
+using BindlessKey = SlotKey<Texture>;
 
 class BindlessSet {
 public:
+    static constexpr uint32_t TEXTURE_BINDING = 0;
+    static constexpr uint32_t SAMPLER_BINDING = 1;
+    static constexpr uint32_t SAMPLER_COUNT = 
+        static_cast<uint32_t>(Sampler::Count) 
+            + static_cast<uint32_t>(ComparisonSampler::Count);
+
     BindlessSet() = default;
 
     BindlessSet(
         DeviceHandle device, 
         uint32_t frames_in_flight,
         uint32_t max_textures,
-        uint32_t max_texture_arrays,
         const TextureSamplerInfo& sampler_info = {}
     );
 
@@ -63,8 +56,6 @@ public:
     }
 
 private:
-    SlotMap<Texture>* get_slot_map(BindlessType type);
-    const SlotMap<Texture>* get_slot_map(BindlessType type) const;
     void destroy_texture(BindlessKey texture);
     void bind_samplers(vk::DescriptorSet set);
     void create_samplers();
@@ -81,14 +72,9 @@ private:
     vk::DescriptorSetLayout desc_set_layout;
     vk::DescriptorSet desc_set;
 
-    using Samplers = std::array<vk::Sampler, static_cast<size_t>(Sampler::Count)>;
-    using CmpSamplers = std::array<vk::Sampler, static_cast<size_t>(ComparisonSampler::Count)>;
-
     SlotMap<Texture> textures;
-    SlotMap<Texture> texture_arrays;
+    std::array<vk::Sampler, SAMPLER_COUNT> samplers;
     std::deque<PendingDestroy> destroy_queue;
-    Samplers samplers;
-    CmpSamplers cmp_samplers;
     TextureSamplerInfo sampler_info;
     bool should_reconfigure_samplers = false;
     uint32_t frames_in_flight;

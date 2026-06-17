@@ -99,6 +99,7 @@ function(add_shaders TARGET)
                 -target spirv -profile spirv_1_5
                 -emit-spirv-directly -fvk-use-entrypoint-name
                 -warnings-disable 41012
+                -warnings-disable 39001
                 -o "${out_spv}"
             DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${shader}" ${module_deps}
             COMMENT "Compiling Slang shader ${shader}"
@@ -183,6 +184,8 @@ add_executable(
     src/bindless_set.h
     src/bindless_set.cpp
     src/aabb.h
+    src/cascades.h
+    src/cascades.cpp
 )
 add_shaders(
     ${PROJECT_NAME}

@@ -5,10 +5,10 @@ import parallax;
 import textures;
 
 public struct Material {
-    TextureIndices base_color;
-    TextureIndices normal_map;
-    TextureIndices displacement_map;
-    TextureIndices aorm_map;
+    BindlessTexture2D base_color;
+    BindlessTexture2D normal_map;
+    BindlessTexture2D displacement_map;
+    BindlessTexture2D aorm_map;
 
     float3 base_color_factor;
     float normal_factor;

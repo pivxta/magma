@@ -16,7 +16,6 @@ struct Draw {
 }
 
 struct ShadowConstants {
-    uint view_count;
     ImmutablePtr<float4x4> views;
     ImmutablePtr<Instance> instances;
     ImmutablePtr<Draw> draws;

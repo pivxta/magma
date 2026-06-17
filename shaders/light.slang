@@ -12,27 +12,27 @@ static const uint MAX_CASCADES = 4;
 
 struct DirectionalLight: Light {
     float3 direction;
-    float padding;
     float3 color;
     float illuminance;
 
     bool shadows_enabled;
+    uint cascade_count;
     float[MAX_CASCADES] cascade_depths;
     float4x4[MAX_CASCADES] cascade_world_to_clip;
-    RenderTargetIndices shadow_map;
+    BindlessShadowMapArray shadow_map;
 
     bool should_cull(float3 position) {
         return false;
     }
 
     float get_shadow_factor(float3 position, float4x4 world_to_view) {
-        if (!this.shadows_enabled) {
+        if (!this.shadows_enabled || this.cascade_count == 0) {
             return 1.0;
         }
 
         let position_view_space = mul(world_to_view, float4(position, 1.0)).xyz;
-        uint cascade = MAX_CASCADES - 1;
-        for (uint i = 0; i < MAX_CASCADES - 1; i++) {
+        uint cascade = this.cascade_count - 1;
+        for (uint i = 0; i < this.cascade_count - 1; i++) {
             if (position_view_space.z < this.cascade_depths[i]) {
                 cascade = i;
                 break;
@@ -49,7 +49,7 @@ struct DirectionalLight: Light {
         }
 
         let shadow_map_coords = float3(0.5 * shadow_clip_position.xy + 0.5, cascade);
-        return this.shadow_map.sample_cmp_array(shadow_map_coords, shadow_clip_position.z);
+        return this.shadow_map.sample(shadow_map_coords, shadow_clip_position.z);
     }
 
     float3 get_incident_radiance(float3 position) {
@@ -67,7 +67,7 @@ struct PointLight: Light {
     float3 color;
     float intensity;
     bool shadows_enabled;
-    RenderTargetIndices shadow_map;
+    BindlessShadowMapCube shadow_map;
 
     bool should_cull(float3 position) {
         let fragment_to_light = this.position - position;

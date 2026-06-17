@@ -23,7 +23,7 @@ enum Tonemap {
 };
 
 struct TonemapConstants {
-    RenderTargetIndices input;
+    BindlessRenderTarget2D input;
     Tonemap tonemap;
     float exposure;
     AgxLook agx_look;

@@ -104,11 +104,29 @@ struct RenderTargetSubresourceState {
     bool operator==(const RenderTargetSubresourceState&) const = default;
 };
 
+struct MipLevelRange {
+    uint32_t base = 0;
+    uint32_t count = 1;
+
+    MipLevelRange(uint32_t base, uint32_t count) {
+        this->base = base;
+        this->count = count;
+    }
+};
+
+struct ArrayLayerRange {
+    uint32_t base = 0;
+    uint32_t count = 1;
+
+    ArrayLayerRange(uint32_t base, uint32_t count) {
+        this->base = base;
+        this->count = count;
+    }
+};
+
 struct RenderTargetUsage {
-    uint32_t base_mip_level = 0;
-    uint32_t mip_level_count = 1;
-    uint32_t base_array_layer = 0;
-    uint32_t array_layer_count = 1;
+    std::optional<ArrayLayerRange> array_layers;
+    std::optional<MipLevelRange> mip_levels;
     RenderTargetSubresourceState new_state;
     bool discard = false;
 
@@ -154,35 +172,13 @@ struct RenderTargetUsage {
         );
     }
 
-    RenderTargetUsage& set_base_mip_level(uint32_t value) {
-        this->base_mip_level = value;
-        return *this;
-    }
-
-    RenderTargetUsage& set_mip_level_count(uint32_t value) {
-        this->mip_level_count = value;
-        return *this;
-    }
-
     RenderTargetUsage& set_mip_level_range(uint32_t base, uint32_t count) {
-        this->base_mip_level = base;
-        this->mip_level_count = count;
-        return *this;
-    }
-
-    RenderTargetUsage& set_base_array_layer(uint32_t value) {
-        this->base_array_layer = value;
-        return *this;
-    }
-
-    RenderTargetUsage& set_array_layer_count(uint32_t value) {
-        this->array_layer_count = value;
+        this->mip_levels = MipLevelRange(base, count);
         return *this;
     }
 
     RenderTargetUsage& set_array_layer_range(uint32_t base, uint32_t count) {
-        this->base_array_layer = base;
-        this->array_layer_count = count;
+        this->array_layers = ArrayLayerRange(base, count);
         return *this;
     }
 
@@ -203,8 +199,7 @@ public:
     RenderTargetManager(
         const DeviceHandle& device, 
         uint32_t frames_in_flight,
-        uint32_t max_targets,
-        uint32_t max_array_targets
+        uint32_t max_targets
     );
 
     RenderTargetManager(const RenderTargetManager&) = delete;

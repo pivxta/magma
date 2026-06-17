@@ -1,7 +1,7 @@
 import textures;
 
 float2 parallax(
-    TextureIndices displacement_texture,
+    BindlessTexture2D displacement_texture,
     float displacement_factor,
     float3 local_view_dir,
     float2 tex_coords,

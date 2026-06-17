@@ -14,6 +14,7 @@
 #include "mesh_manager.h"
 #include "render_target_manager.h"
 #include "device.h"
+#include "cascades.h"
 #include "scene.h"
 #include "time.h"
 #include <vector>
@@ -30,11 +31,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <vulkan/vulkan.hpp>
 
-static constexpr size_t MAX_CASCADES = 4;
-static constexpr float CASCADE_LAMBDA = 0.6f;
-static constexpr float SHADOW_DISTANCE = 40.0f;
 static constexpr uint32_t MAX_RENDER_TARGETS = 256;
-static constexpr uint32_t MAX_RENDER_TARGET_ARRAYS = 256;
 static constexpr uint32_t MAX_TEXTURES = 4096;
 static constexpr uint32_t MAX_MATERIALS = 2048;
 static constexpr auto FRAME_ARENA_CAPACITY_PER_FIF = static_cast<vk::DeviceSize>(16 * 1024 * 1024);
@@ -107,7 +104,6 @@ struct ShadowViewData {
 };
 
 struct ShadowConstants {
-    uint32_t view_count;
     vk::DeviceAddress views;
     vk::DeviceAddress instances;
     vk::DeviceAddress draws;
@@ -129,19 +125,21 @@ struct AmbientLightData {
 };
 
 struct PointLightData {
-    alignas(16) glm::vec3 position;
+    glm::vec3 position;
     float radius;
-    alignas(16) glm::vec3 color;
+    glm::vec3 color;
     float intensity;
-    bool shadows_enabled;
+    uint32_t shadows_enabled;
     RenderTargetIndices shadow_map;
 };
 
 struct DirectionalLightData {
-    alignas(16) glm::vec3 direction;
-    alignas(16) glm::vec3 color;
+    glm::vec3 direction;
+    glm::vec3 color;
     float illuminance;
+
     uint32_t shadows_enabled;
+    uint32_t cascade_count;
     std::array<float, MAX_CASCADES> cascade_depths;
     std::array<glm::mat4, MAX_CASCADES> cascade_world_to_clip;
     RenderTargetIndices shadow_map;
@@ -152,13 +150,13 @@ struct DirectionalLightShadowData {
 };
 
 struct ViewData {
-    alignas(16) glm::mat4 world_to_clip;
-    alignas(16) glm::mat4 world_to_view;
-    alignas(16) glm::vec3 position;
+    glm::mat4 world_to_clip;
+    glm::mat4 world_to_view;
+    glm::vec3 position;
 };
 
 struct LightData {
-    alignas(16) glm::vec3 ambient_color;
+    glm::vec3 ambient_color;
     float ambient_illuminance;
     uint32_t point_count;
     uint32_t directional_count;
@@ -201,130 +199,6 @@ struct FrameData {
     FrameSubBuffer<vk::DrawIndexedIndirectCommand> draw_commands;
 };
 
-std::array<float, MAX_CASCADES> compute_cascade_depths(float near, float far) {
-    std::array<float, MAX_CASCADES> depths;
-    for (size_t i = 0; i < MAX_CASCADES; i++) {
-        const auto t = static_cast<float>(i + 1) / MAX_CASCADES;
-        const float uniform = near + (far - near) * t;
-        const float log = near * std::pow(far / near, t);
-        depths[i] = glm::mix(uniform, log, CASCADE_LAMBDA);
-    }
-    return depths;
-}
-
-// Camera world->clip with the far plane pulled in to `far_cap`, so the fitted
-// cascades cover the shadow distance instead of the full render range. Stays
-// reverse-Z (far passed as the near arg) to match the camera's own projection.
-glm::mat4 capped_world_to_clip(const Camera& camera, float width, float height, float far_cap) {
-    const auto view = camera.world_to_view();
-    if (const auto* persp = std::get_if<PerspectiveProjection>(&camera.projection)) {
-        return glm::perspectiveFovLH_ZO(persp->fov_radians, width, height, far_cap, persp->near) * view;
-    }
-    return camera.world_to_clip(width, height);
-}
-
-std::array<glm::vec3, 8> frustum_corners(const glm::mat4& clip_to_world) {
-    std::array<glm::vec3, 8> corners;
-    for (int i = 0; i < 8; i++) {
-        const auto corner = clip_to_world * glm::vec4(
-            static_cast<float>(2 * (i % 2) - 1),
-            static_cast<float>(2 * ((i / 2) % 2) - 1),
-            static_cast<float>((i / 4) % 2),
-            1.0f
-        );
-        corners[i] = corner / corner.w;
-    }
-    return corners;
-}
-
-std::array<glm::vec3, 8> slice_corners(const std::array<glm::vec3, 8>& corners, float t0, float t1) {
-    std::array<glm::vec3, 8> slice;
-    for (int i = 0; i < 4; i++) {
-        const auto near_corner = corners[i + 4];
-        const auto far_corner = corners[i];
-        slice[i] = glm::mix(near_corner, far_corner, t0);
-        slice[i + 4] = glm::mix(near_corner, far_corner, t1);
-    }
-    return slice;
-}
-
-glm::mat4 calculate_cascade_world_to_clip(
-    const std::array<glm::vec3, 8>& corners,
-    glm::vec3 light_direction,
-    float resolution,
-    float radius_resolution = 16.0f
-) {
-    const glm::vec3 center = std::ranges::fold_left(corners, glm::vec3(0.0f), std::plus<>{}) / 8.0f;
-    float radius = 0.0f;
-    for (const auto& corner: corners) {
-        radius = std::max(radius, glm::distance(corner, center));
-    }
-    radius = std::ceil(radius * radius_resolution) / radius_resolution;
-
-    const auto direction = glm::normalize(light_direction);
-    const auto up = glm::abs(direction.y) < 0.99f ?
-        glm::vec3(0.0f, -1.0f, 0.0f) :
-        glm::vec3(0.0f, 0.0f, 1.0f);
-    const auto world_to_view = glm::lookAtLH(center - direction * radius, center, up);
-
-    const auto view_center = glm::vec3(world_to_view * glm::vec4(center, 1.0f));
-    float texels_per_unit = resolution / (2.0f * radius);
-    const auto snap_view_center = glm::floor(view_center * texels_per_unit) / texels_per_unit;
-    const auto view_to_clip = glm::orthoLH_ZO(
-        snap_view_center.x - radius,
-        snap_view_center.x + radius,
-        snap_view_center.y - radius,
-        snap_view_center.y + radius,
-        2.0f * radius, 0.0f
-    );
-    const auto world_to_clip = view_to_clip * world_to_view;
-
-    static size_t log_count = 0;
-    if (log_count < MAX_CASCADES) {
-        log_count++;
-        // Project the fit center and every slice corner: center should land near
-        // (0,0) and all corners should sit inside [-1,1] xy with z in [0,1].
-        const auto center_ndc = world_to_clip * glm::vec4(center, 1.0f);
-        float max_xy = 0.0f;
-        float min_z = 1e9f, max_z = -1e9f;
-        for (const auto& c: corners) {
-            const auto p = world_to_clip * glm::vec4(c, 1.0f);
-            max_xy = std::max({max_xy, std::abs(p.x), std::abs(p.y)});
-            min_z = std::min(min_z, p.z);
-            max_z = std::max(max_z, p.z);
-        }
-        spdlog::info(
-            "cascade {}: radius={:.3f} center_ndc=({:.3f},{:.3f},{:.3f}) corner_max_xy={:.3f} z=[{:.3f},{:.3f}]",
-            log_count - 1, radius, center_ndc.x, center_ndc.y, center_ndc.z, max_xy, min_z, max_z
-        );
-    }
-    return world_to_clip;
-}
-
-std::array<glm::mat4, MAX_CASCADES> compute_cascade_matrices(
-    const std::array<glm::vec3, 8>& frustum_corners,
-    float near,
-    float far,
-    const std::array<float, MAX_CASCADES>& cascade_depths,
-    glm::vec3 light_direction,
-    float resolution,
-    float radius_resolution = 16.0f
-) {
-    std::array<glm::mat4, MAX_CASCADES> matrices;
-    for (size_t i = 0; i < MAX_CASCADES; i++) {
-        const auto range = far - near;
-        const auto t1 = cascade_depths[i] / range;
-        const auto t0 = i == 0 ? 0.0f : cascade_depths[i - 1] / range;
-        const auto slice = slice_corners(frustum_corners, t0, t1);
-        matrices[i] = calculate_cascade_world_to_clip(
-            slice, 
-            light_direction, 
-            resolution, 
-            radius_resolution
-        );
-    }
-    return matrices;
-}
 
 static inline std::vector<uint32_t> read_spirv_file(const std::filesystem::path& path) {
     auto file_size = std::filesystem::file_size(path);
@@ -425,14 +299,13 @@ struct Renderer::Inner {
         this->targets = RenderTargetManager(
             this->device,
             FRAMES_IN_FLIGHT,
-            MAX_RENDER_TARGETS,
-            MAX_RENDER_TARGET_ARRAYS
+            MAX_RENDER_TARGETS
         );
         this->textures = TextureManager(
             this->device,
             this->uploader,
             FRAMES_IN_FLIGHT,
-            MAX_TEXTURES, 0
+            MAX_TEXTURES
         );
         this->materials = MaterialManager(
             this->device,
@@ -915,11 +788,13 @@ struct Renderer::Inner {
 
     ViewData get_view_data(const Camera& camera) {
         vk::Extent2D viewport_size = this->swapchain.extent();
-        auto viewport_width = static_cast<float>(viewport_size.width);
-        auto viewport_height = static_cast<float>(viewport_size.height);
+        auto viewport = glm::vec2(
+            static_cast<float>(viewport_size.width),
+            static_cast<float>(viewport_size.height)
+        );
 
         return {
-            .world_to_clip = camera.world_to_clip(viewport_width, viewport_height),
+            .world_to_clip = camera.world_to_clip(viewport),
             .world_to_view = camera.world_to_view(),
             .position = camera.transform.translation,
         };
@@ -955,29 +830,21 @@ struct Renderer::Inner {
 
         this->scene_data.dir_lights.clear();
         this->scene_data.dir_light_shadows.clear();
-        const auto viewport = this->swapchain.extent();
-        // Frustum is capped at SHADOW_DISTANCE so the splits, the slices and the t
-        // normalization in compute_cascade_matrices all share the same far.
-        const auto frustum = frustum_corners(glm::inverse(capped_world_to_clip(
-            scene.camera,
-            static_cast<float>(viewport.width),
-            static_cast<float>(viewport.height),
-            SHADOW_DISTANCE
-        )));
+        const auto viewport = glm::vec2(
+            static_cast<float>(this->swapchain.extent().width),
+            static_cast<float>(this->swapchain.extent().height)
+        );
         for (const auto& light: scene.directional_lights) {
-            std::array<float, MAX_CASCADES> cascade_depths;
-            std::array<glm::mat4, MAX_CASCADES> cascade_world_to_clip;
+            Cascades cascades;
             if (light.shadows_enabled) {
-                const float near = scene.camera.near();
-                cascade_depths = compute_cascade_depths(near, SHADOW_DISTANCE);
-                cascade_world_to_clip = compute_cascade_matrices(
-                    frustum, near, SHADOW_DISTANCE,
-                    cascade_depths, 
-                    light.direction,
-                    static_cast<float>(this->shadow_resolution.width)
+                cascades = Cascades(
+                    CascadeInfo(this->shadow_resolution.width),
+                    scene.camera,
+                    viewport,
+                    light
                 );
                 this->scene_data.dir_light_shadows.push_back({
-                    .world_to_clip = cascade_world_to_clip
+                    .world_to_clip = cascades.world_to_clip
                 });
             }
             this->scene_data.dir_lights.push_back({ 
@@ -985,8 +852,9 @@ struct Renderer::Inner {
                 .color = light.color,
                 .illuminance = light.illuminance,
                 .shadows_enabled = light.shadows_enabled,
-                .cascade_depths = cascade_depths,
-                .cascade_world_to_clip = cascade_world_to_clip,
+                .cascade_count = cascades.count,
+                .cascade_depths = cascades.depths,
+                .cascade_world_to_clip = cascades.world_to_clip,
                 .shadow_map = light.shadows_enabled ? 
                     this->targets.get_indices(this->shadow_target, ComparisonSampler::Linear).value() :
                     RenderTargetIndices {}
@@ -1095,18 +963,13 @@ struct Renderer::Inner {
         const FrameData& data,
         const Scene& scene
     ) {
-        this->targets.use(
-            cmd, 
-            this->shadow_target,
-            RenderTargetUsage::depth_attachment().set_array_layer_range(0, MAX_CASCADES)
-        );
+        this->targets.use(cmd, this->shadow_target, RenderTargetUsage::depth_attachment());
 
         FrameSubBuffer views = this->frame_arena
             .add(this->scene_data.dir_light_shadows[0].world_to_clip)
             .value();
 
         ShadowConstants shadow_constants = {
-            .view_count = MAX_CASCADES,
             .views = views.address(),
             .instances = data.instances.address(),
             .draws = data.draws.address(),
@@ -1160,11 +1023,7 @@ struct Renderer::Inner {
     void record_draw_commands(vk::CommandBuffer cmd, const FrameData& data) {
         this->targets.use(cmd, this->hdr_target, RenderTargetUsage::color_attachment());
         this->targets.use(cmd, this->depth_target, RenderTargetUsage::depth_attachment());
-        this->targets.use(
-            cmd, 
-            this->shadow_target, 
-            RenderTargetUsage::shader_read().set_array_layer_range(0, MAX_CASCADES)
-        );
+        this->targets.use(cmd, this->shadow_target, RenderTargetUsage::shader_read());
 
         DrawConstants draw_constants = {
             .view_data = data.view_data.address(),

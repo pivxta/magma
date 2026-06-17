@@ -5,10 +5,9 @@
 RenderTargetManager::RenderTargetManager(
     const DeviceHandle& device, 
     uint32_t frames_in_flight,
-    uint32_t max_targets,
-    uint32_t max_array_targets
+    uint32_t max_targets
 ): 
-    bindless_set(device, frames_in_flight, max_targets, max_array_targets),
+    bindless_set(device, frames_in_flight, max_targets),
     targets(max_targets)
 {
     this->frames_in_flight = frames_in_flight;
@@ -172,10 +171,25 @@ void RenderTargetManager::use(
         auto aspect = texture->used_aspects();
         std::array<vk::ImageMemoryBarrier2, MAX_BARRIERS> barriers;
         for (const auto& usage: usages) {
-            for (uint32_t layer_offset = 0; layer_offset < usage.array_layer_count; layer_offset++) {
-                for (uint32_t mip_offset = 0; mip_offset < usage.mip_level_count; mip_offset++) {
-                    uint32_t layer = usage.base_array_layer + layer_offset;
-                    uint32_t level = usage.base_mip_level + mip_offset;
+            uint32_t base_array_layer = 0;
+            uint32_t array_layer_count = texture->array_layers();
+            uint32_t base_mip_level = 0;
+            uint32_t mip_level_count = texture->mip_levels();
+
+            if (usage.mip_levels.has_value()) {
+                base_mip_level = usage.mip_levels->base;
+                mip_level_count = usage.mip_levels->count;
+            }
+
+            if (usage.array_layers.has_value()) {
+                base_array_layer = usage.array_layers->base;
+                array_layer_count = usage.array_layers->count;
+            }
+            
+            for (uint32_t layer_offset = 0; layer_offset < array_layer_count; layer_offset++) {
+                for (uint32_t mip_offset = 0; mip_offset < mip_level_count; mip_offset++) {
+                    uint32_t layer = base_array_layer + layer_offset;
+                    uint32_t level = base_mip_level + mip_offset;
                     auto& state = target->states[this->get_state_index(*target, layer, level)];
 
                     RenderTargetSubresourceState src_state = usage.discard ?
@@ -345,8 +359,8 @@ uint32_t RenderTargetManager::get_current_bindless_index(const Target& target) c
     assert(target.owned);
     
     if (target.buffering == RenderTargetBuffering::PerFif) {
-        return target.keys[this->frame_index].index();
+        return target.keys[this->frame_index].index;
     } else {
-        return target.keys[0].index();
+        return target.keys[0].index;
     }
 }
