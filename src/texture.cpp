@@ -34,7 +34,7 @@ Texture::Texture(const DeviceHandle& device, const vk::ImageCreateInfo& info) {
     this->extent_ = info.extent;
     this->format_ = info.format;
     this->usage_ = info.usage;
-    this->view_ = this->create_view(
+    this->view = this->create_view(
         device, 
         TextureViewCreateInfo()
             .set_base_mip_level(0)
@@ -65,7 +65,7 @@ Texture::Texture(
     this->array_layers_ = array_layers;
     this->mip_levels_ = mip_levels;
     this->samples_ = samples;
-    this->view_ = this->create_view(
+    this->view = this->create_view(
         device, 
         TextureViewCreateInfo()
             .set_base_mip_level(0)
@@ -75,7 +75,7 @@ Texture::Texture(
     );
 }
 
-vk::ImageView Texture::create_view(
+TextureView Texture::create_view(
     const DeviceHandle& device, 
     const TextureViewCreateInfo& info // Aspect flags set automatically if not already set
 ) const {
@@ -94,5 +94,12 @@ vk::ImageView Texture::create_view(
             ) 
     );
     vk_expect(result, "Failed to create image view");
-    return image_view;
+
+    TextureView view;
+    view.view = image_view;
+    view.base_array_layer_ = info.base_array_layer;
+    view.array_layer_count_ = info.array_layer_count;
+    view.base_mip_level_ = info.base_mip_level;
+    view.mip_level_count_ = info.mip_level_count;
+    return view;
 }

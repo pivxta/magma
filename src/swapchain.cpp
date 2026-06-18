@@ -3,7 +3,6 @@
 #include "vk_error.h"
 #include <algorithm>
 #include <limits>
-#include <utility>
 
 Swapchain::Swapchain(const InstanceHandle& instance, const std::shared_ptr<Target>& target) {
     this->instance = instance;
@@ -12,32 +11,6 @@ Swapchain::Swapchain(const InstanceHandle& instance, const std::shared_ptr<Targe
     auto [result, surface] = target->target_surface(instance->instance);
     vk_expect(result, "Failed to create surface");
     this->surface_ = surface;
-}
-
-Swapchain::Swapchain(Swapchain&& other) noexcept
-    : instance(std::move(other.instance)),
-      device(std::move(other.device)),
-      target(std::move(other.target)),
-      extent_(other.extent_),
-      format_(other.format_),
-      surface_(std::exchange(other.surface_, nullptr)),
-      swapchain(std::exchange(other.swapchain, nullptr)),
-      textures(std::move(other.textures)),
-      presentable(std::move(other.presentable)) {}
-
-Swapchain& Swapchain::operator=(Swapchain&& other) noexcept {
-    if (this != &other) {
-        std::swap(this->instance, other.instance);
-        std::swap(this->device, other.device);
-        std::swap(this->target, other.target);
-        std::swap(this->extent_, other.extent_);
-        std::swap(this->format_, other.format_);
-        std::swap(this->surface_, other.surface_);
-        std::swap(this->swapchain, other.swapchain);
-        std::swap(this->textures, other.textures);
-        std::swap(this->presentable, other.presentable);
-    }
-    return *this;
 }
 
 static void destroy_semaphores(vk::Device device, std::vector<vk::Semaphore>& semaphores) {
@@ -195,11 +168,11 @@ vk::Result Swapchain::configure(const DeviceHandle& device, const SwapchainConfi
     return vk::Result::eSuccess;
 }
 
-std::tuple<vk::Result, SwapchainTexture> Swapchain::acquire_texture(vk::Semaphore image_available) {
+std::tuple<vk::Result, SwapchainTexture> Swapchain::acquire_texture(vk::Semaphore frame_available) {
     auto [result, index] = this->device->logical.acquireNextImageKHR(
         this->swapchain,
         std::numeric_limits<uint64_t>::max(),
-        image_available
+        frame_available
     );
     if (result != vk::Result::eSuccess && result != vk::Result::eSuboptimalKHR) {
         return {result, SwapchainTexture{}};
@@ -210,18 +183,18 @@ std::tuple<vk::Result, SwapchainTexture> Swapchain::acquire_texture(vk::Semaphor
         SwapchainTexture{
             .index = index,
             .texture = &this->textures[index],
-            .available = image_available,
             .presentable = this->presentable[index]
         }
     };
 }
 
 vk::Result Swapchain::present(const SwapchainTexture& image) {
+    vk::Semaphore presentable = image.presentable;
     return this->device->graphics_queue.presentKHR(
         vk::PresentInfoKHR()
             .setSwapchains(this->swapchain)
             .setImageIndices(image.index)
-            .setWaitSemaphores(image.presentable)
+            .setWaitSemaphores(presentable)
     );
 }
 
@@ -234,8 +207,6 @@ Swapchain::~Swapchain() {
             this->device->logical.destroySwapchainKHR(this->swapchain);
         }
     }
-    // The surface belongs to the instance (created in the ctor, before any
-    // device exists), so it is torn down via the instance, not the device.
     if (this->instance && this->surface_) {
         this->instance->instance.destroySurfaceKHR(this->surface_);
     }

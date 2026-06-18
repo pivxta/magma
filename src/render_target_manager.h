@@ -37,18 +37,12 @@ struct FixedSizePolicy {
 using SizePolicy = std::variant<SwapchainAdjustedSizePolicy, FixedSizePolicy>;
 
 struct RenderTargetInfo {
-    RenderTargetBuffering buffering = RenderTargetBuffering::PerFif;
     SizePolicy size_policy = SwapchainAdjustedSizePolicy{};
     vk::ImageUsageFlags usage = {}; // Required format-derived usage flags are set automatically
     vk::SampleCountFlagBits samples = vk::SampleCountFlagBits::e1;
     vk::Format format = vk::Format::eUndefined;
     uint32_t mip_levels = 1;
     uint32_t array_layers = 1;
-
-    RenderTargetInfo& set_buffering(RenderTargetBuffering value) {
-        this->buffering = value;
-        return *this;
-    }
 
     RenderTargetInfo& set_size_policy(SizePolicy value) {
         this->size_policy = value;
@@ -193,12 +187,14 @@ struct RenderTargetUsage {
     }
 };
 
+class Swapchain;
+
 class RenderTargetManager {
 public:
     RenderTargetManager() = default;
     RenderTargetManager(
         const DeviceHandle& device, 
-        uint32_t frames_in_flight,
+        const Swapchain& swapchain,
         uint32_t max_targets
     );
 
@@ -207,12 +203,9 @@ public:
     RenderTargetManager(RenderTargetManager&&) noexcept = default;
     RenderTargetManager& operator=(RenderTargetManager&&) noexcept = default;
 
-    void destroy_pending() {
-        this->bindless_set.update_pending();
-    }
-
-    std::optional<RenderTargetId> add(const RenderTargetInfo& info);
     std::optional<RenderTargetId> reserve(); 
+    std::optional<RenderTargetId> add(const RenderTargetInfo& info);
+    bool reset(RenderTargetId id, const RenderTargetInfo& info);
     void bind(RenderTargetId id, const Texture& texture);
     void free(RenderTargetId id);
     
@@ -259,23 +252,18 @@ public:
     }
     
     void resize_swapchain(vk::Extent2D swapchain_extent);
-    void begin_frame(uint64_t frame_counter);
 
 private:
     struct Target {
         bool owned = false;
         const Texture* bound = nullptr;
         RenderTargetBuffering buffering = RenderTargetBuffering::Shared;
-        std::optional<SizePolicy> size_policy;
         std::vector<RenderTargetSubresourceState> states;
-        std::vector<BindlessKey> keys; 
+        std::optional<SizePolicy> size_policy;
+        std::optional<BindlessKey> key;
         uint32_t mip_levels = 0;
         uint32_t array_layers = 0;
     };
-
-    size_t get_state_index(const Target& target, uint32_t array_layer, uint32_t mip_level) const;
-    size_t get_state_count(const Target& target) const;
-    size_t get_texture_count(const RenderTargetInfo& info) const;
 
     static SlotKey<Target> get_slot_key(RenderTargetId id);
     static RenderTargetId get_target_id(SlotKey<Target> key);
@@ -283,11 +271,8 @@ private:
     bool initialize_target(Target& target, const RenderTargetInfo& info);
     bool recreate_target(Target& target);
     const Texture* get_target_texture(const Target& target) const;
-    uint32_t get_current_bindless_index(const Target& target) const;
 
     BindlessSet bindless_set;
     SlotMap<Target> targets;
     vk::Extent2D swapchain_extent;
-    uint32_t frames_in_flight;
-    uint32_t frame_index = 0;
 };

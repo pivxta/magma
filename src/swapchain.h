@@ -28,7 +28,6 @@ struct SwapchainConfigureInfo {
 struct SwapchainTexture {
     uint32_t index;
     const Texture* texture;
-    vk::Semaphore available;
     vk::Semaphore presentable;
 };
 
@@ -45,8 +44,8 @@ public:
 
     Swapchain(const Swapchain&) = delete;
     Swapchain& operator=(const Swapchain&) = delete;
-    Swapchain(Swapchain&& other) noexcept;
-    Swapchain& operator=(Swapchain&& other) noexcept;
+    Swapchain(Swapchain&& other) noexcept = default;
+    Swapchain& operator=(Swapchain&& other) noexcept = default;
 
     vk::SurfaceKHR surface() const {
         return this->surface_;
@@ -77,7 +76,7 @@ public:
     
     vk::Result configure(const DeviceHandle& device, const SwapchainConfigureInfo& info);
     vk::Result present(const SwapchainTexture& texture);
-    std::tuple<vk::Result, SwapchainTexture> acquire_texture(vk::Semaphore image_available);
+    std::tuple<vk::Result, SwapchainTexture> acquire_texture(vk::Semaphore frame_available);
 
 private:
     InstanceHandle instance;

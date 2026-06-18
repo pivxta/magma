@@ -14,11 +14,7 @@ class MaterialManager {
 public:
     MaterialManager() = default;
 
-    explicit MaterialManager(
-        DeviceHandle device,
-        uint32_t frames_in_flight,
-        uint32_t max_materials
-    );
+    explicit MaterialManager(DeviceHandle device, uint32_t max_materials);
 
     MaterialManager(const MaterialManager&) = delete;
     MaterialManager& operator=(const MaterialManager&) = delete;
@@ -26,8 +22,7 @@ public:
     MaterialManager& operator=(MaterialManager&&) noexcept = default;
     ~MaterialManager();
 
-    void flag_dirty_materials(const TextureManager& texture_manager);
-    void update_dirty(const TextureManager& texture_manager, uint32_t frame_index);
+    void update_dirty(const TextureManager& texture_manager);
 
     const Material* get(MaterialId id) const;
     MaterialId add(const Material& material);
@@ -36,11 +31,12 @@ public:
 
     uint32_t get_index(MaterialId id) const;
 
-    vk::DeviceAddress buffer_address(uint32_t frame_index) const {
-        return this->buffers[frame_index].address();
+    vk::DeviceAddress buffer_address() const {
+        return this->buffers[this->device->frame_index()].address();
     }
 
 private:
+    void flag_dirty_materials(const TextureManager& texture_manager);
     void set_dirty(SlotKey<Material> key);
 
     DeviceHandle device;

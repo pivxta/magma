@@ -19,7 +19,7 @@ struct DirectionalLight: Light {
     uint cascade_count;
     float[MAX_CASCADES] cascade_depths;
     float4x4[MAX_CASCADES] cascade_world_to_clip;
-    BindlessShadowMapArray shadow_map;
+    BindlessArrayShadowMap shadow_map;
 
     bool should_cull(float3 position) {
         return false;
@@ -39,7 +39,18 @@ struct DirectionalLight: Light {
             }
         }
 
-        var shadow_clip_position = mul(this.cascade_world_to_clip[cascade], float4(position, 1.0));
+        // What the hell is this loop is doing here? you might be asking yourself
+        // Ask my freaking RX580s stupid windows GPU driver that cant index a fucking
+        // matrix pointer correctly
+        float4x4 world_to_clip = this.cascade_world_to_clip[0];
+        [ForceUnroll]
+        for (uint i = 0; i < MAX_CASCADES; i++) {
+            if (cascade == i) {
+                world_to_clip = this.cascade_world_to_clip[i];
+            }
+        }
+
+        var shadow_clip_position = mul(world_to_clip, float4(position, 1.0));
         shadow_clip_position /= shadow_clip_position.w;
         if (shadow_clip_position.x < -1.0 
             || shadow_clip_position.x > 1.0
@@ -48,8 +59,8 @@ struct DirectionalLight: Light {
             return 1.0;
         }
 
-        let shadow_map_coords = float3(0.5 * shadow_clip_position.xy + 0.5, cascade);
-        return this.shadow_map.sample(shadow_map_coords, shadow_clip_position.z);
+        let shadow_map_coords = float2(0.5 * shadow_clip_position.xy + 0.5);
+        return this.shadow_map.sample(cascade, shadow_map_coords, shadow_clip_position.z);
     }
 
     float3 get_incident_radiance(float3 position) {
@@ -67,7 +78,7 @@ struct PointLight: Light {
     float3 color;
     float intensity;
     bool shadows_enabled;
-    BindlessShadowMapCube shadow_map;
+    BindlessCubeShadowMap shadow_map;
 
     bool should_cull(float3 position) {
         let fragment_to_light = this.position - position;

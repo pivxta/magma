@@ -71,14 +71,11 @@ static vk::DescriptorSet create_set(
 
 BindlessSet::BindlessSet(
     DeviceHandle device, 
-    uint32_t frames_in_flight,
     uint32_t max_textures,
     const TextureSamplerInfo& sampler_info
-):
-    textures(max_textures)
-{
+) {
     this->device = std::move(device);
-    this->frames_in_flight = frames_in_flight;
+    this->textures = std::make_shared<SlotMap<Texture>>(max_textures);
     this->desc_pool = create_descriptor_pool(this->device->logical, max_textures);
     this->desc_set_layout = create_set_layout(this->device->logical, max_textures);
     this->desc_set = create_set(this->device->logical, this->desc_pool, this->desc_set_layout);
@@ -87,39 +84,29 @@ BindlessSet::BindlessSet(
 }
 
 BindlessSet::~BindlessSet() {
-    if (!this->device) {
-        return;
+    if (this->device != nullptr) {
+        this->device->wait_idle();
+        this->device->logical.destroyDescriptorSetLayout(this->desc_set_layout);
+        this->device->logical.destroyDescriptorPool(this->desc_pool);
+        this->destroy_samplers();
+        this->textures->clear([&](Texture& texture) {
+            texture.destroy(this->device);
+        });
     }
-    this->device->logical.destroyDescriptorSetLayout(this->desc_set_layout);
-    this->device->logical.destroyDescriptorPool(this->desc_pool);
-    this->destroy_samplers();
-    this->textures.clear([&](Texture& texture) {
-        texture.destroy(this->device);
-    });
 }
 
-void BindlessSet::update_pending() {
+void BindlessSet::update_dirty_samplers() {
     if (this->should_reconfigure_samplers) {
         this->device->wait_idle();
         this->destroy_samplers();
         this->create_samplers();
-    }
-
-    while (!this->destroy_queue.empty()) {
-        const PendingDestroy& pending = this->destroy_queue.back();
-        if (this->frame_counter - pending.request_frame >= this->frames_in_flight) {
-            this->destroy_texture(pending.texture);
-            this->destroy_queue.pop_back();
-        } else {
-            break;
-        }
     }
 }
 
 std::optional<BindlessKey> BindlessSet::add_texture(
     const std::function<Texture(const DeviceHandle&)>& create
 ) {
-    if (auto key = this->textures.reserve(); key.has_value()) {
+    if (auto key = this->textures->reserve(); key.has_value()) {
         Texture texture = create(this->device);
         auto info = vk::DescriptorImageInfo()
             .setImageView(texture.default_view())
@@ -133,21 +120,25 @@ std::optional<BindlessKey> BindlessSet::add_texture(
                 .setImageInfo(info), 
             {}
         );
-        *this->textures.get(key.value()) = texture;
+        *this->textures->get(key.value()) = texture;
         return key;
     }
     return std::nullopt;
 }
 
 void BindlessSet::free_texture(BindlessKey key) {
-    this->destroy_queue.push_front(PendingDestroy{
-        .request_frame = this->frame_counter,
-        .texture = key
+    auto device = this->device;
+    auto textures = this->textures;
+    this->device->defer([device, textures, key]() {
+        textures->free(key, [&](Texture& texture) {
+            texture.destroy(device);
+            texture = Texture{};
+        });
     });
 }
 
 const Texture* BindlessSet::get_texture(BindlessKey key) const {
-    return this->textures.get(key);
+    return this->textures->get(key);
 }
 
 static uint32_t get_sampler_index(Sampler sampler) { 
@@ -325,7 +316,7 @@ void BindlessSet::destroy_samplers() {
 }
 
 void BindlessSet::destroy_texture(BindlessKey key) {
-    this->textures.free(key, [&](Texture& texture) {
+    this->textures->free(key, [&](Texture& texture) {
         texture.destroy(this->device);
         texture = Texture{};
     });

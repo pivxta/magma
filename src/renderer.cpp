@@ -1,3 +1,4 @@
+#include <ranges>
 #define VMA_IMPLEMENTATION
 #include "renderer.h"
 #include "swapchain.h"
@@ -5,6 +6,7 @@
 #include "uploader.h"
 #include "target.h"
 #include "frame_arena_buffer.h"
+#include "frame_ring.h"
 #include "camera.h"
 #include "image.h"
 #include "mesh.h"
@@ -13,6 +15,7 @@
 #include "material_manager.h"
 #include "mesh_manager.h"
 #include "render_target_manager.h"
+#include "shadow_map_arena.h"
 #include "device.h"
 #include "cascades.h"
 #include "scene.h"
@@ -130,7 +133,7 @@ struct PointLightData {
     glm::vec3 color;
     float intensity;
     uint32_t shadows_enabled;
-    RenderTargetIndices shadow_map;
+    CubeShadowMapIndices shadow_map;
 };
 
 struct DirectionalLightData {
@@ -142,11 +145,15 @@ struct DirectionalLightData {
     uint32_t cascade_count;
     std::array<float, MAX_CASCADES> cascade_depths;
     std::array<glm::mat4, MAX_CASCADES> cascade_world_to_clip;
-    RenderTargetIndices shadow_map;
+    ArrayShadowMapIndices shadow_map;
 };
 
 struct DirectionalLightShadowData {
-    std::array<glm::mat4, MAX_CASCADES> world_to_clip;    
+    uint32_t light_index;
+    Cascades cascades;
+    ArrayShadowMap shadow_map;
+    float bias_constant_factor;
+    float bias_slope_factor;
 };
 
 struct ViewData {
@@ -184,8 +191,6 @@ struct SceneDrawData {
     std::vector<ScratchData> scratch;
     std::vector<DrawData> draws;
     std::vector<vk::DrawIndexedIndirectCommand> draw_commands;
-
-    Aabb bounds;
 };
 
 struct FrameData {
@@ -220,21 +225,11 @@ static inline std::vector<uint32_t> read_spirv_file(const std::filesystem::path&
 };
 
 struct Renderer::Inner {
-    static constexpr uint32_t FRAMES_IN_FLIGHT = 2;
     InstanceHandle instance;
     DeviceHandle device;
     Swapchain swapchain;
     SwapchainConfigureInfo swapchain_info;
     bool should_reconfigure_swapchain = false;
-
-    std::vector<vk::Fence> fences;              // One per frame in flight
-    std::vector<vk::Semaphore> image_available; // One per frame in flight
-
-    uint32_t frame_index = 0;
-    uint64_t frame_counter = 0;
-
-    vk::CommandPool command_pool;
-    std::vector<vk::CommandBuffer> command_buffers; // One per frame in flight
 
     vk::Pipeline pipeline;
     vk::PipelineLayout pipeline_layout;
@@ -248,16 +243,17 @@ struct Renderer::Inner {
     RenderTargetId swapchain_target;
     RenderTargetId hdr_target;
     RenderTargetId depth_target;
-    RenderTargetId shadow_target;
-    vk::Extent2D shadow_resolution = vk::Extent2D(1024, 1024);
 
     Uploader uploader;
+    FrameRing frame_ring;
     FrameArenaBuffer frame_arena;
     RenderTargetManager targets;
     TextureManager textures;
     MaterialManager materials;
     MeshManager meshes;
     SceneDrawData scene_data;
+    ArrayShadowMapArena directional_shadow_maps;
+    CubeShadowMapArena point_shadow_maps;
 
     ~Inner() {
         this->device->wait_idle();
@@ -267,156 +263,67 @@ struct Renderer::Inner {
         this->device->logical.destroyPipelineLayout(this->tonemap_pipeline_layout);
         this->device->logical.destroyPipeline(this->pipeline);
         this->device->logical.destroyPipelineLayout(this->pipeline_layout);
-        this->device->logical.freeCommandBuffers(this->command_pool, this->command_buffers);
-        this->device->logical.destroyCommandPool(this->command_pool);
-        this->destroy_sync_primitives();
     }
 
     void initialize(const std::shared_ptr<Target>& target) {
-        this->instance = create_instance(*target);
-        this->swapchain = Swapchain(this->instance, target);
+        constexpr uint32_t FRAMES_IN_FLIGHT = 2;
 
-        auto device = create_device(this->instance, this->swapchain);
+        this->instance = Instance::create(*target);
+        this->swapchain = Swapchain(this->instance, target);
+        auto device = Device::create(this->instance, this->swapchain, FRAMES_IN_FLIGHT);
         if (!device.has_value()) {
             spdlog::critical("Failed to create a suitable device");
             std::exit(1);
         }
         this->device = device.value();
-
         this->swapchain_info = SwapchainConfigureInfo()
             .set_format(vk::Format::eB8G8R8A8Srgb)
             .set_colorspace(vk::ColorSpaceKHR::eSrgbNonlinear)
             .set_present_mode(vk::PresentModeKHR::eMailbox);
-
-        this->configure_render_targets();
-        this->create_sync_primitives();
-        this->create_command_pool();
-        this->uploader = Uploader(
-            this->device,
-            FRAMES_IN_FLIGHT,
-            UPLOADER_CAPACITY_PER_FIF
-        );
-        this->targets = RenderTargetManager(
-            this->device,
-            FRAMES_IN_FLIGHT,
-            MAX_RENDER_TARGETS
-        );
-        this->textures = TextureManager(
-            this->device,
-            this->uploader,
-            FRAMES_IN_FLIGHT,
-            MAX_TEXTURES
-        );
-        this->materials = MaterialManager(
-            this->device,
-            FRAMES_IN_FLIGHT,
-            MAX_MATERIALS
-        );
-        this->meshes = MeshManager(
-            this->device,
-            FRAMES_IN_FLIGHT,
-            VERTEX_HEAP_CAPACITY,
-            INDEX_HEAP_CAPACITY
-        );
+        this->swapchain.configure(this->device, this->swapchain_info);
+        this->uploader = Uploader(this->device, UPLOADER_CAPACITY_PER_FIF);
+        this->targets = RenderTargetManager(this->device, this->swapchain, MAX_RENDER_TARGETS);
+        this->textures = TextureManager(this->device, this->uploader, MAX_TEXTURES);
+        this->materials = MaterialManager(this->device, MAX_MATERIALS);
+        this->meshes = MeshManager(this->device, VERTEX_HEAP_CAPACITY, INDEX_HEAP_CAPACITY);
+        this->frame_ring = FrameRing(this->device);
         this->frame_arena = FrameArenaBuffer(
             this->device,
             vk::BufferUsageFlagBits::eStorageBuffer
                 | vk::BufferUsageFlagBits::eIndirectBuffer,
-            FRAMES_IN_FLIGHT,
             FRAME_ARENA_CAPACITY_PER_FIF
         );
-        this->allocate_command_buffers();
-        this->create_render_targets();
-        this->create_pipeline();
-        this->create_tonemap_pipeline();
-        this->create_shadow_pipeline();
-        this->shadow_target = this->targets.add(
-            RenderTargetInfo()
-                .set_buffering(RenderTargetBuffering::Shared)
-                .set_size_policy(FixedSizePolicy(this->shadow_resolution))
-                .set_format(vk::Format::eD32Sfloat)
-                .set_array_layers(MAX_CASCADES)
-        ).value();
-    }
 
-    void create_render_targets() {
-        this->swapchain.configure(this->device, this->swapchain_info);
-        this->targets.resize_swapchain(this->swapchain.extent());
         this->swapchain_target = this->targets.reserve().value();
         this->depth_target = this->targets.add(
             RenderTargetInfo()
-                .set_buffering(RenderTargetBuffering::PerFif)
                 .set_size_policy(SwapchainAdjustedSizePolicy())
                 .set_format(vk::Format::eD32Sfloat)
         ).value();
         this->hdr_target = this->targets.add(
             RenderTargetInfo()
-                .set_buffering(RenderTargetBuffering::PerFif)
                 .set_size_policy(SwapchainAdjustedSizePolicy())
                 .set_format(vk::Format::eR16G16B16A16Sfloat)
         ).value();
+
+        this->directional_shadow_maps = 
+            ArrayShadowMapArena(this->targets, ShadowMapFormat::Float32, 1024);
+        this->point_shadow_maps = 
+            CubeShadowMapArena(this->targets, ShadowMapFormat::Float32, 1024);
+        
+        this->create_pipeline();
+        this->create_tonemap_pipeline();
+        this->create_shadow_pipeline();
     }
 
     void reconfigure_render_targets() {
-        this->configure_render_targets();
-        this->should_reconfigure_swapchain = false;
-    }
-
-    void configure_render_targets() {
         this->device->wait_idle();
         vk_expect(
             this->swapchain.configure(this->device, this->swapchain_info),
             "Failed to configure swapchain"
         );
         this->targets.resize_swapchain(this->swapchain.extent());
-    }
-
-    void create_sync_primitives() {
-        this->fences.resize(FRAMES_IN_FLIGHT);
-        for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
-            auto [result, fence] = this->device->logical.createFence(
-                vk::FenceCreateInfo().setFlags(vk::FenceCreateFlagBits::eSignaled)
-            );
-            vk_expect(result, "Failed to create in-flight fence");
-            this->fences[i] = fence;
-        }
-
-        this->image_available.resize(FRAMES_IN_FLIGHT);
-        for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
-            auto [result, semaphore] = this->device->logical.createSemaphore(vk::SemaphoreCreateInfo());
-            vk_expect(result, "Failed to create image available fence");
-            this->image_available[i] = semaphore;
-        }
-    }
-
-    void destroy_sync_primitives() {
-        for (auto fence : this->fences) {
-            this->device->logical.destroyFence(fence);
-        }
-        for (auto image_available : this->image_available) {
-            this->device->logical.destroySemaphore(image_available);
-        }
-    }
-
-    void create_command_pool() {
-        auto [result, command_pool] = this->device->logical.createCommandPool(
-            vk::CommandPoolCreateInfo()
-                .setFlags(vk::CommandPoolCreateFlagBits::eResetCommandBuffer)
-                .setQueueFamilyIndex(this->device->graphics_queue_family)
-        );
-        vk_expect(result, "Failed to create command pool");
-        this->command_pool = command_pool;
-    }
-
-    void allocate_command_buffers() {
-        auto [result, command_buffers] = this->device->logical.allocateCommandBuffers(
-            vk::CommandBufferAllocateInfo()
-                .setCommandPool(command_pool)
-                .setCommandBufferCount(FRAMES_IN_FLIGHT)
-                .setLevel(vk::CommandBufferLevel::ePrimary)
-        );
-        vk_expect(result, "Failed to allocate command buffers");
-        this->command_buffers = command_buffers;
+        this->should_reconfigure_swapchain = false;
     }
 
     void create_tonemap_pipeline() {
@@ -732,41 +639,31 @@ struct Renderer::Inner {
     void draw(const Scene& scene) {
         this->update_scene_draw_data(scene);
 
-        vk::Fence fence = this->fences[this->frame_index];
-
-        vk_expect(
-            this->device->logical.waitForFences(
-                fence, true,
-                std::numeric_limits<uint64_t>::max()
-            ),
-            "Fence wait failed"
-        );
-
-        auto [result1, swapchain_texture] = this->swapchain.acquire_texture(
-            this->image_available[this->frame_index]
-        );
+        vk::Semaphore frame_available = this->frame_ring.wait();
+        auto [result1, swapchain_texture] = this->swapchain.acquire_texture(frame_available);
 
         if (result1 == vk::Result::eErrorOutOfDateKHR) {
             this->reconfigure_render_targets();
             return;
         } else if (result1 != vk::Result::eSuboptimalKHR) {
-            vk_expect(result1, "Critical swapchain image acquisition failure");
+            vk_expect(result1, "Failed to acquire texture");
         }
 
-        vk_expect(this->device->logical.resetFences(fence), "Fence reset failed");
-        this->meshes.free_pending();
-        this->textures.update_pending();
-        this->targets.destroy_pending();
-        this->materials.flag_dirty_materials(this->textures);
-        this->materials.update_dirty(this->textures, this->frame_index);
-        this->textures.clear_updated();
-        this->targets.bind(this->swapchain_target, *swapchain_texture.texture);
+        this->frame_ring.run(swapchain_texture.presentable, [&](vk::CommandBuffer command_buffer) {
+            this->frame_arena.reset();
+            this->textures.update_dirty_samplers();
+            this->materials.update_dirty(this->textures);
+            this->textures.clear_updated();
 
-        vk::CommandBuffer command_buffer = this->begin_frame_commands();
-        this->uploader.flush(command_buffer);
-        this->textures.flush_mip_maps(command_buffer);
-        this->record_frame_commands(command_buffer, swapchain_texture, scene);
-        this->submit_frame_commands(command_buffer, swapchain_texture);
+            this->targets.bind(this->swapchain_target, *swapchain_texture.texture);
+            this->uploader.flush(command_buffer);
+            this->textures.flush_mip_maps(command_buffer);
+
+            FrameData data = this->write_frame_data();
+            this->record_shadow_commands(command_buffer, data);
+            this->record_draw_commands(command_buffer, data);
+            this->record_tonemap_commands(command_buffer, swapchain_texture, scene);
+        });
 
         vk::Result result2 = this->swapchain.present(swapchain_texture);
         if (result2 == vk::Result::eSuboptimalKHR 
@@ -775,15 +672,6 @@ struct Renderer::Inner {
         {
             this->reconfigure_render_targets();
         }
-
-        this->frame_counter += 1;
-        this->frame_index = this->frame_counter % FRAMES_IN_FLIGHT;
-
-        this->uploader.begin_frame(this->frame_index);
-        this->frame_arena.begin_frame(this->frame_index);
-        this->textures.begin_frame(this->frame_counter);
-        this->meshes.begin_frame(this->frame_counter);
-        this->targets.begin_frame(this->frame_counter);
     }
 
     ViewData get_view_data(const Camera& camera) {
@@ -808,16 +696,6 @@ struct Renderer::Inner {
             .illuminance = scene.ambient_light.illuminance
         };
 
-        this->scene_data.bounds = Aabb();
-        for (const auto& object: scene.mesh_objects) {
-            if (!this->meshes.is_valid(object.mesh)) {
-                continue;
-            }
-            this->scene_data.bounds.merge(
-                object.transform.affine_matrix() * this->meshes.get_bounds(object.mesh)
-            );
-        }
-
         this->scene_data.point_lights.clear();
         for (const auto& light: scene.point_lights) {
             this->scene_data.point_lights.push_back({
@@ -834,31 +712,43 @@ struct Renderer::Inner {
             static_cast<float>(this->swapchain.extent().width),
             static_cast<float>(this->swapchain.extent().height)
         );
+
         for (const auto& light: scene.directional_lights) {
-            Cascades cascades;
-            if (light.shadows_enabled) {
-                cascades = Cascades(
-                    CascadeInfo(this->shadow_resolution.width),
-                    scene.camera,
-                    viewport,
-                    light
-                );
-                this->scene_data.dir_light_shadows.push_back({
-                    .world_to_clip = cascades.world_to_clip
-                });
-            }
             this->scene_data.dir_lights.push_back({ 
                 .direction = light.direction,
                 .color = light.color,
                 .illuminance = light.illuminance,
                 .shadows_enabled = light.shadows_enabled,
-                .cascade_count = cascades.count,
-                .cascade_depths = cascades.depths,
-                .cascade_world_to_clip = cascades.world_to_clip,
-                .shadow_map = light.shadows_enabled ? 
-                    this->targets.get_indices(this->shadow_target, ComparisonSampler::Linear).value() :
-                    RenderTargetIndices {}
+                .cascade_count = 0,
             });
+        }
+
+        this->directional_shadow_maps.reset();
+        for (const auto [index, light]: std::views::enumerate(scene.directional_lights)) {
+            if (light.shadows_enabled) {
+                const auto cascades = Cascades(
+                    CascadeInfo(this->directional_shadow_maps.resolution()),
+                    scene.camera,
+                    viewport,
+                    light
+                );
+                this->scene_data.dir_light_shadows.push_back({
+                    .light_index = static_cast<uint32_t>(index),
+                    .cascades = cascades,
+                    .shadow_map = this->directional_shadow_maps.allocate(cascades.count),
+                    .bias_constant_factor = light.shadow_bias_constant_factor,
+                    .bias_slope_factor = light.shadow_bias_slope_factor,
+                });
+            }
+        }
+        this->directional_shadow_maps.commit(this->targets);
+
+        for (const auto& shadow_data: this->scene_data.dir_light_shadows) {
+            auto& light = this->scene_data.dir_lights[shadow_data.light_index];
+            light.cascade_count = shadow_data.cascades.count;
+            light.cascade_depths = shadow_data.cascades.depths;
+            light.cascade_world_to_clip = shadow_data.cascades.world_to_clip;
+            light.shadow_map = shadow_data.shadow_map.indices(this->targets);
         }
 
         this->scene_data.scratch.clear();
@@ -946,91 +836,92 @@ struct Renderer::Inner {
         };
     }
 
-    void record_frame_commands(
-        vk::CommandBuffer cmd, 
-        const SwapchainTexture& swapchain_texture,
-        const Scene& scene
-    ) {
-        FrameData data = this->write_frame_data();
-
-        this->record_shadow_commands(cmd, data, scene);
-        this->record_draw_commands(cmd, data);
-        this->record_tonemap_commands(cmd, swapchain_texture, scene);
-    }
-
-    void record_shadow_commands(
-        vk::CommandBuffer cmd, 
-        const FrameData& data,
-        const Scene& scene
-    ) {
-        this->targets.use(cmd, this->shadow_target, RenderTargetUsage::depth_attachment());
-
-        FrameSubBuffer views = this->frame_arena
-            .add(this->scene_data.dir_light_shadows[0].world_to_clip)
-            .value();
-
-        ShadowConstants shadow_constants = {
-            .views = views.address(),
-            .instances = data.instances.address(),
-            .draws = data.draws.address(),
-        };
-        cmd.pushConstants<ShadowConstants>(
-            this->shadow_pipeline_layout,
-            vk::ShaderStageFlagBits::eVertex,
-            0, {shadow_constants}
-        );
-
-        auto depth_attachment = vk::RenderingAttachmentInfo()
-            .setImageView(this->targets.get_texture(this->shadow_target)->default_view())
-            .setImageLayout(vk::ImageLayout::eDepthAttachmentOptimal)
-            .setClearValue(vk::ClearDepthStencilValue(0.0f))
-            .setLoadOp(vk::AttachmentLoadOp::eClear)
-            .setStoreOp(vk::AttachmentStoreOp::eStore);
-
-        auto rendering = vk::RenderingInfo()
-            .setViewMask((1 << MAX_CASCADES) - 1)
-            .setLayerCount(MAX_CASCADES)
-            .setPDepthAttachment(&depth_attachment)
-            .setRenderArea(vk::Rect2D(vk::Offset2D(), this->shadow_resolution));
-
-        cmd.beginRendering(rendering);
-        cmd.setViewport(0, vk::Viewport(
-            0.0f, 0.0f, 
-            static_cast<float>(this->shadow_resolution.width),
-            static_cast<float>(this->shadow_resolution.height),
-            0.0f, 1.0f
-        ));
-        // Negated for reverse-Z: a positive (intuitive) bias pushes the stored
-        // occluder away from the light, which is toward smaller depth here.
-        cmd.setDepthBias(
-            -scene.directional_lights[0].shadow_bias_constant_factor, 0.0f,
-            -scene.directional_lights[0].shadow_bias_slope_factor
-        );
-        cmd.setScissor(0, vk::Rect2D(vk::Offset2D(), this->shadow_resolution));
-        cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, this->shadow_pipeline);
-        cmd.bindIndexBuffer(this->meshes.index_buffer(), 0, vk::IndexType::eUint32);
-        if (data.draw_commands.length() > 0) {
-            cmd.drawIndexedIndirect(
-                data.draw_commands.buffer(), 
-                data.draw_commands.buffer_offset(),
-                static_cast<uint32_t>(data.draw_commands.length()),
-                sizeof(vk::DrawIndexedIndirectCommand)
+    void record_shadow_commands(vk::CommandBuffer cmd, const FrameData& data) {
+        for (const auto& shadows: this->scene_data.dir_light_shadows) {
+            this->targets.use(
+                cmd,
+                shadows.shadow_map.atlas, 
+                RenderTargetUsage::depth_attachment()
+                    .set_array_layer_range(
+                        shadows.shadow_map.base_layer, 
+                        shadows.shadow_map.layer_count
+                    )
             );
+
+            FrameSubBuffer views = this->frame_arena.add(shadows.cascades.world_to_clip).value();
+            ShadowConstants shadow_constants = {
+                .views = views.address(),
+                .instances = data.instances.address(),
+                .draws = data.draws.address(),
+            };
+            cmd.pushConstants<ShadowConstants>(
+                this->shadow_pipeline_layout,
+                vk::ShaderStageFlagBits::eVertex,
+                0, {shadow_constants}
+            );
+
+            auto depth_attachment = vk::RenderingAttachmentInfo()
+                .setImageView(this->targets.get_texture(shadows.shadow_map.atlas)->default_view())
+                .setImageLayout(vk::ImageLayout::eDepthAttachmentOptimal)
+                .setClearValue(vk::ClearDepthStencilValue(0.0f))
+                .setLoadOp(vk::AttachmentLoadOp::eClear)
+                .setStoreOp(vk::AttachmentStoreOp::eStore);
+
+            auto rendering = vk::RenderingInfo()
+                .setPDepthAttachment(&depth_attachment)
+                .setViewMask((1 << shadows.cascades.count) - 1)
+                .setLayerCount(shadows.cascades.count)
+                .setRenderArea(vk::Rect2D(
+                    vk::Offset2D(), 
+                    vk::Extent2D(
+                        shadows.shadow_map.resolution, 
+                        shadows.shadow_map.resolution
+                    )
+                ));
+
+            cmd.beginRendering(rendering);
+            cmd.setViewport(0, vk::Viewport(
+                0.0f, 0.0f, 
+                static_cast<float>(shadows.shadow_map.resolution),
+                static_cast<float>(shadows.shadow_map.resolution),
+                0.0f, 1.0f
+            ));
+            cmd.setScissor(0, vk::Rect2D(
+                vk::Offset2D(), 
+                vk::Extent2D(
+                    shadows.shadow_map.resolution, 
+                    shadows.shadow_map.resolution
+                )
+            ));
+            cmd.setDepthBias(
+                -shadows.bias_constant_factor, 0.0f,
+                -shadows.bias_slope_factor
+            );
+            cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, this->shadow_pipeline);
+            cmd.bindIndexBuffer(this->meshes.index_buffer(), 0, vk::IndexType::eUint32);
+            if (data.draw_commands.length() > 0) {
+                cmd.drawIndexedIndirect(
+                    data.draw_commands.buffer(), 
+                    data.draw_commands.buffer_offset(),
+                    static_cast<uint32_t>(data.draw_commands.length()),
+                    sizeof(vk::DrawIndexedIndirectCommand)
+                );
+            }
+            cmd.endRendering();
         }
-        cmd.endRendering();
     }
 
     void record_draw_commands(vk::CommandBuffer cmd, const FrameData& data) {
         this->targets.use(cmd, this->hdr_target, RenderTargetUsage::color_attachment());
         this->targets.use(cmd, this->depth_target, RenderTargetUsage::depth_attachment());
-        this->targets.use(cmd, this->shadow_target, RenderTargetUsage::shader_read());
+        this->targets.use(cmd, this->directional_shadow_maps.atlas(), RenderTargetUsage::shader_read());
 
         DrawConstants draw_constants = {
             .view_data = data.view_data.address(),
             .light_data = data.light_data.address(),
             .point_lights = data.point_lights.address(),
             .directional_lights = data.dir_lights.address(),
-            .materials = this->materials.buffer_address(this->frame_index),
+            .materials = this->materials.buffer_address(),
             .instances = data.instances.address(),
             .draws = data.draws.address()
         };
@@ -1142,44 +1033,6 @@ struct Renderer::Inner {
         );
     }
 
-    vk::CommandBuffer begin_frame_commands() {
-        vk::CommandBuffer command_buffer = this->command_buffers[this->frame_index];
-        vk_expect(command_buffer.reset(), "Failed to reset command buffer");
-        vk_expect(
-            command_buffer.begin(
-                vk::CommandBufferBeginInfo()
-                    .setFlags(vk::CommandBufferUsageFlagBits::eOneTimeSubmit)
-            ),
-            "Failed to begin command buffer"
-        );
-
-        return command_buffer;
-    }
-
-    void submit_frame_commands(vk::CommandBuffer cmd, const SwapchainTexture& swapchain_texture) {
-        vk_expect(cmd.end(), "Failed to end command buffer");
-
-        auto command_buffer_info = vk::CommandBufferSubmitInfo().setCommandBuffer(cmd);
-
-        auto wait_info = vk::SemaphoreSubmitInfo()
-            .setSemaphore(swapchain_texture.available)
-            .setStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput);
-
-        auto signal_info = vk::SemaphoreSubmitInfo()
-            .setSemaphore(swapchain_texture.presentable)
-            .setStageMask(vk::PipelineStageFlagBits2::eAllCommands);
-
-        vk_expect(
-            this->device->graphics_queue.submit2(
-                vk::SubmitInfo2()
-                    .setWaitSemaphoreInfos(wait_info)
-                    .setSignalSemaphoreInfos(signal_info)
-                    .setCommandBufferInfos(command_buffer_info),
-                this->fences[this->frame_index]
-            ),
-            "Failed to submit command buffer"
-        );
-    }
 };
 
 Renderer::Renderer() = default;

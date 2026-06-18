@@ -1,11 +1,7 @@
 #include "uploader.h"
 #include <spdlog/spdlog.h>
 
-Uploader::Uploader(
-    DeviceHandle device,
-    uint32_t frames_in_flight,
-    vk::DeviceSize capacity_per_fif
-):
+Uploader::Uploader(DeviceHandle device, vk::DeviceSize capacity_per_fif):
     device(std::move(device)),
     arena(capacity_per_fif)
 {
@@ -15,7 +11,7 @@ Uploader::Uploader(
         vk::BufferCreateInfo()
             .setSharingMode(vk::SharingMode::eExclusive)
             .setUsage(vk::BufferUsageFlagBits::eTransferSrc)
-            .setSize(capacity_per_fif * frames_in_flight),
+            .setSize(capacity_per_fif * this->device->frames_in_flight),
         vma::AllocationCreateInfo()
             .setUsage(vma::MemoryUsage::eAuto)
             .setFlags(
@@ -57,7 +53,9 @@ bool Uploader::upload_buffer(BufferUpload upload) {
         return false;
     }
 
-    vk::DeviceSize buffer_offset = this->stride * this->frame_index + staging_range->offset;
+    const uint32_t frame_index = this->device->frame_index();
+
+    vk::DeviceSize buffer_offset = this->stride * frame_index + staging_range->offset;
     memcpy(this->buffer.mapped(buffer_offset), upload.memory, upload.size);
     this->buffer.flush(this->device, buffer_offset, upload.size);
 
@@ -68,7 +66,7 @@ bool Uploader::upload_buffer(BufferUpload upload) {
         .usage_access = upload.usage_access,
         .usage_stage = upload.usage_stage,
         .staging_range = staging_range.value(),
-        .frame_index = this->frame_index
+        .frame_index = this->device->frame_index()
     });
     return true;
 }
@@ -88,7 +86,8 @@ bool Uploader::upload_image(ImageUpload upload) {
         return false;
     }
 
-    vk::DeviceSize buffer_offset = this->stride * this->frame_index + staging_range->offset;
+    const uint32_t frame_index = this->device->frame_index();
+    vk::DeviceSize buffer_offset = this->stride * frame_index + staging_range->offset;
     memcpy(this->buffer.mapped(buffer_offset), upload.image->bytes.data(), size);
     this->buffer.flush(this->device, buffer_offset, size);
 
@@ -97,7 +96,7 @@ bool Uploader::upload_image(ImageUpload upload) {
         .extent = upload.extent,
         .offset = upload.offset,
         .staging_range = staging_range.value(),
-        .frame_index = this->frame_index
+        .frame_index = frame_index
     });
     return true;
 }
@@ -185,11 +184,6 @@ void Uploader::record_image_upload(
     );
 }
 
-void Uploader::begin_frame(uint32_t frame_index) {
-    this->frame_index = frame_index;
-    this->arena.reset();
-}
-
 void Uploader::flush(vk::CommandBuffer command_buffer) {
     for (auto& upload: this->pending_images) {
         this->record_image_upload(command_buffer, upload);
@@ -200,4 +194,5 @@ void Uploader::flush(vk::CommandBuffer command_buffer) {
         this->record_buffer_upload(command_buffer, upload);
     }
     this->pending_buffers.clear();
+    this->arena.reset();
 }

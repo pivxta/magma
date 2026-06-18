@@ -1,22 +1,27 @@
 #pragma once
 #include <optional>
 #include <memory>
+#include <functional>
 #include <vulkan/vulkan.hpp>
 #include <vk_mem_alloc.hpp>
 #include "target.h"
 
 class Swapchain;
+struct Instance;
+struct Device;
+using DeviceHandle = std::shared_ptr<const Device>;
+using InstanceHandle = std::shared_ptr<const Instance>;
 
-struct InstanceContext {
+struct Instance {
     vk::Instance instance;
     vk::DebugUtilsMessengerEXT debug_messenger = nullptr;
 
-    ~InstanceContext();
+    ~Instance();
+
+    static InstanceHandle create(const Target& target);
 };
 
-using InstanceHandle = std::shared_ptr<const InstanceContext>;
-
-struct DeviceContext {
+struct Device {
     InstanceHandle instance;
     vk::PhysicalDeviceProperties2 properties;
     vk::PhysicalDevice physical;
@@ -24,16 +29,30 @@ struct DeviceContext {
     vk::Device logical;
     vk::Queue graphics_queue;
     uint32_t graphics_queue_family = 0;
+    uint32_t frames_in_flight;
 
-    ~DeviceContext();
+    static std::optional<DeviceHandle> create(
+        const InstanceHandle& instance, 
+        const Swapchain& swapchain,
+        uint32_t frames_in_flight
+    );
+
+    ~Device();
+
+    void defer(std::function<void()> fn) const;
+    void next_frame() const;
+    void flush_deferred() const;
+    void wipe_deferred() const;
+    uint64_t frame_counter() const;
+    uint32_t frame_index() const;
 
     void wait_idle() const;
+
+private:
+    struct DeferredQueue;
+    struct FrameState;
+
+    std::unique_ptr<DeferredQueue> deferred_queue;
+    std::unique_ptr<FrameState> frame_state;
 };
 
-using DeviceHandle = std::shared_ptr<const DeviceContext>;
-
-InstanceHandle create_instance(const Target& target);
-std::optional<DeviceHandle> create_device(
-    const InstanceHandle& instance, 
-    const Swapchain& swapchain
-);

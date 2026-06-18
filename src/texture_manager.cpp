@@ -6,11 +6,10 @@
 TextureManager::TextureManager(
     const DeviceHandle& device,
     Uploader& uploader,
-    uint32_t frames_in_flight,
     uint32_t max_textures,
     const TextureSamplerInfo& sampler_info
 ):
-    bindless_set(device, frames_in_flight, max_textures, sampler_info)
+    bindless_set(device, max_textures, sampler_info)
 {
     this->create_fallbacks(uploader);
 }
@@ -50,8 +49,8 @@ TextureIndices TextureManager::get_fallback_indices(TextureFallback fallback) co
     };
 }
 
-void TextureManager::update_pending() {
-    this->bindless_set.update_pending();
+void TextureManager::update_dirty_samplers() {
+    this->bindless_set.update_dirty_samplers();
 }
 
 TextureIndices TextureManager::get_fallback(TextureFallback fallback) const {

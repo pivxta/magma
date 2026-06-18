@@ -60,14 +60,10 @@ static MaterialData get_material_data(const Material& material, const TextureMan
     };
 }
 
-static std::vector<Buffer> create_buffers(
-    const DeviceHandle& device,
-    uint32_t frames_in_flight,
-    uint32_t max_materials
-) {
+static std::vector<Buffer> create_buffers(const DeviceHandle& device, uint32_t max_materials) {
     std::vector<Buffer> buffers;
-    buffers.reserve(frames_in_flight);
-    for (uint32_t i = 0; i < frames_in_flight; i++) {
+    buffers.reserve(device->frames_in_flight);
+    for (uint32_t i = 0; i < device->frames_in_flight; i++) {
         buffers.emplace_back(
             device,
             vk::BufferCreateInfo()
@@ -88,29 +84,21 @@ static std::vector<Buffer> create_buffers(
     return buffers;
 }
 
-MaterialManager::MaterialManager(
-    DeviceHandle device,
-    uint32_t frames_in_flight,
-    uint32_t max_materials
-):
+MaterialManager::MaterialManager(DeviceHandle device, uint32_t max_materials):
     device(std::move(device)),
-    dirty(frames_in_flight),
+    dirty(this->device->frames_in_flight),
     materials(max_materials)
 {
-    this->buffers = create_buffers(
-        this->device,
-        frames_in_flight,
-        max_materials
-    );
+    this->buffers = create_buffers(this->device, max_materials);
     this->fallback = this->add(Material {});
 }
 
 MaterialManager::~MaterialManager() {
-    if (!this->device) {
-        return;
-    }
-    for (auto& buffer: this->buffers) {
-        buffer.destroy(this->device);
+    if (this->device != nullptr) {
+        this->device->wait_idle();
+        for (auto& buffer: this->buffers) {
+            buffer.destroy(this->device);
+        }
     }
 }
 
@@ -140,7 +128,10 @@ void MaterialManager::flag_dirty_materials(const TextureManager& texture_manager
     });
 }
 
-void MaterialManager::update_dirty(const TextureManager& texture_manager, uint32_t frame_index) {
+void MaterialManager::update_dirty(const TextureManager& texture_manager) {
+    this->flag_dirty_materials(texture_manager);
+
+    uint32_t frame_index = this->device->frame_index();
     if (this->dirty[frame_index].empty()) {
         return;
     }

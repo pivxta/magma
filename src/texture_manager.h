@@ -27,7 +27,6 @@ public:
     TextureManager(
         const DeviceHandle& device,
         Uploader& uploader,
-        uint32_t frames_in_flight,
         uint32_t max_textures,
         const TextureSamplerInfo& sampler_info = {}
     );
@@ -37,7 +36,7 @@ public:
     TextureManager(TextureManager&&) noexcept = default;
     TextureManager& operator=(TextureManager&&) noexcept = default;
 
-    void update_pending();
+    void update_dirty_samplers();
     
     TextureIndices get(TextureId id, TextureFallback fallback = TextureFallback::ColorError) const;
     TextureIndices get_fallback(TextureFallback fallback = TextureFallback::ColorError) const;
@@ -61,10 +60,6 @@ public:
 
     void configure_samplers(const TextureSamplerInfo& info) {
         this->bindless_set.configure_samplers(info);
-    }
-
-    void begin_frame(uint64_t frame_counter) {
-        this->bindless_set.begin_frame(frame_counter);
     }
 
     void clear_updated() {

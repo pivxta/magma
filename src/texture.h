@@ -28,6 +28,56 @@ struct TextureViewCreateInfo {
         this->mip_level_count = mip_level_count;
         return *this;
     }
+
+    bool operator==(const TextureViewCreateInfo&) const = default;
+};
+
+class TextureView {
+public:
+    void destroy(const DeviceHandle& device) {
+        if (this->view != vk::ImageView()) {
+            device->logical.destroyImageView(this->view);
+            this->view = vk::ImageView();
+        }
+    }
+
+    uint32_t base_array_layer() const {
+        return this->base_array_layer_;
+    }
+
+    uint32_t array_layer_count() const {
+        return this->array_layer_count_;
+    }
+
+    uint32_t base_mip_level() const {
+        return this->base_mip_level_;
+    }
+
+    uint32_t mip_level_count() const {
+        return this->mip_level_count_;
+    }
+
+    bool is_null() const {
+        return this->view == vk::ImageView();
+    }
+
+    operator vk::ImageView() const {
+        return this->view;
+    }
+
+private:
+    friend class Texture;
+
+    vk::ImageView view;
+    uint32_t base_array_layer_;
+    uint32_t array_layer_count_;
+    uint32_t base_mip_level_;
+    uint32_t mip_level_count_;
+};
+
+struct TextureViewCache {
+public:
+private:
 };
 
 static inline vk::ImageAspectFlags get_default_aspect_flags(vk::Format format);
@@ -58,9 +108,9 @@ public:
     );
 
     void destroy(const DeviceHandle& device) {
-        if (this->view_ != vk::ImageView{}) {
-            device->logical.destroyImageView(this->view_);
-            this->view_ = vk::ImageView{};
+        if (this->view != vk::ImageView{}) {
+            device->logical.destroyImageView(this->view);
+            this->view = vk::ImageView{};
         }
         if (this->owned && this->image != vk::Image{}) {
             device->allocator.destroyImage(this->image, this->allocation);
@@ -68,13 +118,19 @@ public:
         }
     }
 
-    vk::ImageView create_view(
+    TextureView create_view(
         const DeviceHandle& handle, 
         const TextureViewCreateInfo& info
     ) const;
 
-    vk::ImageView default_view() const {
-        return this->view_;
+    TextureView default_view() const {
+        TextureView view;
+        view.view = this->view;
+        view.base_array_layer_ = 0;
+        view.array_layer_count_ = this->array_layers();
+        view.base_mip_level_ = 0;
+        view.mip_level_count_ = this->mip_levels();
+        return view;
     }
 
     vk::ImageUsageFlags usage() const {
@@ -122,7 +178,7 @@ private:
 
     vk::Image image;
     vma::Allocation allocation;
-    vk::ImageView view_;
+    vk::ImageView view;
 
     uint32_t array_layers_ = 0;
     uint32_t mip_levels_ = 0;

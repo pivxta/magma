@@ -186,6 +186,10 @@ add_executable(
     src/aabb.h
     src/cascades.h
     src/cascades.cpp
+    src/shadow_map_arena.h
+    src/shadow_map_arena.cpp
+    src/frame_ring.h
+    src/frame_ring.cpp
 )
 add_shaders(
     ${PROJECT_NAME}

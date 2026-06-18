@@ -2,6 +2,10 @@
 #include "vk_error.h"
 #include "swapchain.h"
 #include "target.h"
+#include <functional>
+#include <mutex>
+#include <atomic>
+#include <deque>
 #include <spdlog/spdlog.h>
 
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
@@ -59,7 +63,7 @@ static vk::DebugUtilsMessengerCreateInfoEXT make_debug_messenger_create_info() {
         .setPfnUserCallback(debug_callback);
 }
 
-InstanceHandle create_instance(const Target& target) {
+InstanceHandle Instance::create(const Target& target) {
     VULKAN_HPP_DEFAULT_DISPATCHER.init(vkGetInstanceProcAddr);
 
     std::vector<const char*> instance_layers;
@@ -108,13 +112,13 @@ InstanceHandle create_instance(const Target& target) {
         debug_messenger = messenger;
     }
 
-    auto ctx = std::make_shared<InstanceContext>();
+    auto ctx = std::make_shared<Instance>();
     ctx->instance = instance;
     ctx->debug_messenger = debug_messenger;
     return ctx;
 }
 
-InstanceContext::~InstanceContext() {
+Instance::~Instance() {
     if (!this->instance) {
         return;
     }
@@ -164,7 +168,7 @@ static std::optional<uint32_t> pick_graphics_queue_family(
     return selected_family;
 }
 
-static bool pick_physical_device(DeviceContext& device, vk::SurfaceKHR surface) {
+static bool pick_physical_device(Device& device, vk::SurfaceKHR surface) {
     auto [result, devices] = device.instance->instance.enumeratePhysicalDevices();
     if (result != vk::Result::eSuccess) {
         spdlog::error("Failed to enumerate physical devices");
@@ -203,13 +207,14 @@ static bool pick_physical_device(DeviceContext& device, vk::SurfaceKHR surface) 
     return false;
 }
 
-static bool create_device_and_queue(DeviceContext& device) {
+static bool create_device_and_queue(Device& device) {
     std::array queue_priorities = {1.0f};
     auto queue_ci = vk::DeviceQueueCreateInfo()
         .setQueuePriorities(queue_priorities)
         .setQueueFamilyIndex(device.graphics_queue_family);
 
     auto features = vk::PhysicalDeviceFeatures()
+        .setImageCubeArray(true)
         .setSamplerAnisotropy(true)
         .setMultiDrawIndirect(true);
 
@@ -335,30 +340,115 @@ static bool create_device_and_queue(DeviceContext& device) {
     return true;
 }
 
-std::optional<DeviceHandle> create_device(
+struct Device::DeferredQueue {
+    void defer(uint64_t frame_counter, std::function<void()> fn) {
+        std::unique_lock lock(this->mutex);
+        this->queue.push_front({
+            .frame_counter = frame_counter,
+            .fn = std::move(fn)
+        });
+    }
+
+    void flush(uint32_t frames_in_flight, uint64_t frame_counter) {
+        std::vector<std::function<void()>> ready;
+        {
+            std::unique_lock lock(this->mutex);
+            while (!this->queue.empty()) {
+                PendingDestruction& pending = this->queue.back();
+                if (frame_counter - pending.frame_counter >= frames_in_flight) {
+                    ready.push_back(std::move(pending.fn));
+                    this->queue.pop_back();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        for (auto& fn: ready) {
+            fn();
+        }
+    }
+
+    void wipe() {
+        std::deque<PendingDestruction> ready;
+        {
+            std::unique_lock lock(this->mutex);
+            ready = std::move(this->queue);
+        }
+
+        for (auto& pending: ready) {
+            pending.fn();
+        }
+    }
+
+private:
+    struct PendingDestruction {
+        uint64_t frame_counter;
+        std::function<void()> fn;
+    };
+
+    std::mutex mutex;
+    std::deque<PendingDestruction> queue;
+};
+
+struct Device::FrameState {
+    std::atomic<uint64_t> counter = 0;
+};
+
+std::optional<DeviceHandle> Device::create(
     const InstanceHandle& instance,
-    const Swapchain& swapchain
+    const Swapchain& swapchain,
+    uint32_t frames_in_flight
 ) {
-    auto ctx = std::make_shared<DeviceContext>();
-    ctx->instance = instance;
-    if (!pick_physical_device(*ctx, swapchain.surface())) {
+    auto device = std::make_shared<Device>();
+    device->instance = instance;
+    device->frames_in_flight = frames_in_flight;
+    device->frame_state = std::make_unique<FrameState>();
+    device->deferred_queue = std::make_unique<DeferredQueue>();
+    if (!pick_physical_device(*device, swapchain.surface())) {
         return std::nullopt;
     }
-    if (!create_device_and_queue(*ctx)) {
+    if (!create_device_and_queue(*device)) {
         return std::nullopt;
     }
-    return ctx;
+    return device;
 }
 
-void DeviceContext::wait_idle() const {
+void Device::defer(std::function<void()> fn) const {
+    this->deferred_queue->defer(this->frame_counter(), std::move(fn));
+}
+
+void Device::next_frame() const {
+    this->frame_state->counter.fetch_add(1, std::memory_order_release);
+}
+
+void Device::flush_deferred() const {
+    this->deferred_queue->flush(this->frames_in_flight, this->frame_counter());
+}
+
+void Device::wipe_deferred() const {
+    this->wait_idle();
+    this->deferred_queue->wipe();
+}
+
+uint64_t Device::frame_counter() const {
+    return this->frame_state->counter.load(std::memory_order_acquire);
+}
+
+uint32_t Device::frame_index() const {
+    return this->frame_state->counter.load(std::memory_order_acquire) % this->frames_in_flight;
+}
+
+void Device::wait_idle() const {
     (void)this->logical.waitIdle();
 }
 
-DeviceContext::~DeviceContext() {
+Device::~Device() {
     if (!this->logical) {
         return;
     }
     this->wait_idle();
+    this->wipe_deferred();
     if (this->allocator) {
         this->allocator.destroy();
     }

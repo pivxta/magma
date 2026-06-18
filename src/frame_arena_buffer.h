@@ -69,7 +69,6 @@ public:
     explicit FrameArenaBuffer(
         DeviceHandle device,
         vk::BufferUsageFlags usage,
-        uint32_t frames_in_flight,
         vk::DeviceSize capacity_per_fif
     );
 
@@ -137,7 +136,7 @@ public:
             return std::nullopt;
         }
 
-        vk::DeviceSize offset = this->stride * this->frame_index + alloc->offset;
+        vk::DeviceSize offset = this->stride * this->device->frame_index() + alloc->offset;
         FrameSubBuffer<T> allocation;
         allocation.parent_buffer = &this->buffer;
         allocation.base_offset = offset;
@@ -149,15 +148,12 @@ public:
     }
 
     void flush();
-    void begin_frame(uint32_t next_frame_index);
+    void reset();
 
 private:
     DeviceHandle device;
 
-    uint32_t frame_index = 0;
-
     Buffer buffer;
     vk::DeviceSize stride = 0;
-
     Arena<vk::DeviceSize> arena;
 };

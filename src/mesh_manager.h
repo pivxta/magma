@@ -25,7 +25,6 @@ public:
 
     explicit MeshManager(
         const DeviceHandle& device,
-        uint32_t frames_in_flight,
         vk::DeviceSize vertex_heap_capacity,
         vk::DeviceSize index_heap_capacity
     );
@@ -43,9 +42,6 @@ public:
     bool free(MeshId id);
 
     bool is_valid(MeshId id) const;
-
-    void free_pending();
-    void begin_frame(uint64_t frame_counter);
 
     const Buffer& index_buffer() const {
         return this->index_heap.buffer();

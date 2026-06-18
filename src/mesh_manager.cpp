@@ -5,13 +5,11 @@ static constexpr vk::DeviceSize INDEX_ALIGNMENT = sizeof(uint32_t);
 
 MeshManager::MeshManager(
     const DeviceHandle& device,
-    uint32_t frames_in_flight,
     vk::DeviceSize vertex_heap_capacity,
     vk::DeviceSize index_heap_capacity
 ) {
     this->vertex_heap = HeapBuffer(
         device,
-        frames_in_flight,
         VERTEX_ALIGNMENT,
         vk::BufferCreateInfo()
             .setSize(vertex_heap_capacity)
@@ -26,7 +24,6 @@ MeshManager::MeshManager(
     );
     this->index_heap = HeapBuffer(
         device,
-        frames_in_flight,
         INDEX_ALIGNMENT,
         vk::BufferCreateInfo()
             .setSize(index_heap_capacity)
@@ -112,16 +109,6 @@ bool MeshManager::free(MeshId id) {
 
 bool MeshManager::is_valid(MeshId id) const {
     return this->meshes.is_valid(get_slot_key(id));
-}
-
-void MeshManager::free_pending() {
-    this->vertex_heap.free_pending();
-    this->index_heap.free_pending();
-}
-
-void MeshManager::begin_frame(uint64_t frame_counter) {
-    this->vertex_heap.begin_frame(frame_counter);
-    this->index_heap.begin_frame(frame_counter);
 }
 
 static std::optional<std::vector<VertexData>> interlace_mesh_attributes(const Mesh& mesh) {

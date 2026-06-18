@@ -1,5 +1,4 @@
 #pragma once
-#include <deque>
 #include <type_traits>
 #include <vulkan/vulkan.hpp>
 #include <vk_mem_alloc.hpp>
@@ -88,7 +87,6 @@ public:
 
     explicit HeapBuffer(
         DeviceHandle device,
-        uint32_t frames_in_flight,
         vk::DeviceSize min_alignment,
         const vk::BufferCreateInfo& buffer_info,
         const vma::AllocationCreateInfo& alloc_info
@@ -109,7 +107,7 @@ public:
         vk::DeviceSize alignment = 
             std::max({this->min_alignment, min_alignment.value_or(1), alignof(T)});
 
-        auto alloc = this->free_list.allocate(count * sizeof(T), alignment);
+        auto alloc = this->free_list->allocate(count * sizeof(T), alignment);
         if (!alloc.has_value()) {
             return std::nullopt;
         }
@@ -124,38 +122,29 @@ public:
     }
 
     template<typename T>
-    void deferred_free(const HeapSubBuffer<T>& allocation) {
-        this->free_queue.push_front(PendingFree{
-            .request_frame = this->frame_counter,
-            .range = allocation.local_range
+    void deferred_free(HeapSubBuffer<T> allocation) {
+        auto free_list = this->free_list;
+        this->device->defer([free_list, allocation]() {
+            free_list->free(allocation.local_range);
         });
     }
 
     template<typename T>
     bool immediate_free(const HeapSubBuffer<T>& allocation) {
-        return this->free_list.free(allocation.local_range);
+        return this->free_list->free(allocation.local_range);
     }
-
-    void begin_frame(uint64_t frame_counter);
-    void free_pending();
 
     const Buffer& buffer() const {
         return this->buffer_;
     }
 
 private:
-    struct PendingFree {
-        uint64_t request_frame;
-        FreeListAllocation<vk::DeviceSize> range;
-    };
-
     DeviceHandle device;
 
     Buffer buffer_;
     vk::DeviceSize min_alignment = 0;
-    uint32_t frames_in_flight = 0;
-    uint64_t frame_counter = 0;
 
-    FreeList<vk::DeviceSize> free_list;
-    std::deque<PendingFree> free_queue;
+    // This is a shared pointer because it has to survive deferred
+    // deletion, which might outlive this object
+    std::shared_ptr<FreeList<vk::DeviceSize>> free_list;
 };

@@ -94,11 +94,7 @@ public:
     static constexpr vk::DeviceSize DEFAULT_ALIGNMENT = 256;
 
     Uploader() = default;
-    explicit Uploader(
-        DeviceHandle device,
-        uint32_t frames_in_flight,
-        vk::DeviceSize capacity_per_fif
-    );
+    explicit Uploader(DeviceHandle device, vk::DeviceSize capacity_per_fif);
 
     Uploader(const Uploader&) = delete;
     Uploader& operator=(const Uploader&) = delete;
@@ -109,8 +105,6 @@ public:
     bool upload_buffer(BufferUpload upload);
     bool upload_image(ImageUpload upload);
 
-    // Called right after the frame counter is increased
-    void begin_frame(uint32_t frame_index);
     void flush(vk::CommandBuffer command_buffer);
 
 private:
@@ -141,8 +135,6 @@ private:
     );
 
     DeviceHandle device;
-
-    uint32_t frame_index = 0;
 
     Buffer buffer;
     vk::DeviceSize stride = 0;

@@ -18,7 +18,6 @@ public:
 
     BindlessSet(
         DeviceHandle device, 
-        uint32_t frames_in_flight,
         uint32_t max_textures,
         const TextureSamplerInfo& sampler_info = {}
     );
@@ -30,7 +29,7 @@ public:
 
     ~BindlessSet();
 
-    void update_pending();
+    void update_dirty_samplers();
     void configure_samplers(const TextureSamplerInfo& info);
 
     std::optional<BindlessKey> add_texture(const std::function<Texture(const DeviceHandle&)>& create);
@@ -40,11 +39,7 @@ public:
     uint32_t get_sampler(ComparisonSampler sampler) const;
 
     uint32_t texture_capacity() const {
-        return this->textures.capacity().value();
-    }
-
-    void begin_frame(uint64_t frame_counter) {
-        this->frame_counter = frame_counter;
+        return this->textures->capacity().value();
     }
 
     vk::DescriptorSetLayout descriptor_set_layout() const {
@@ -61,22 +56,16 @@ private:
     void create_samplers();
     void destroy_samplers();
 
-    struct PendingDestroy {
-        uint64_t request_frame;
-        BindlessKey texture;
-    };
-
     DeviceHandle device;
 
     vk::DescriptorPool desc_pool;
     vk::DescriptorSetLayout desc_set_layout;
     vk::DescriptorSet desc_set;
 
-    SlotMap<Texture> textures;
+    // This is a shared pointer because it has to survive deferred
+    // deletion, which might outlive this object
+    std::shared_ptr<SlotMap<Texture>> textures;
     std::array<vk::Sampler, SAMPLER_COUNT> samplers;
-    std::deque<PendingDestroy> destroy_queue;
     TextureSamplerInfo sampler_info;
     bool should_reconfigure_samplers = false;
-    uint32_t frames_in_flight;
-    uint64_t frame_counter = 0;
 };
